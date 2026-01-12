@@ -3,14 +3,12 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite UI — App.jsx (updated)
- * Adds:
- * 1) Recalculate loading overlay + spinner
- * 2) More formal UI styling (cards, buttons, table polish)
- * Keeps:
- * - Response-shape tolerance
- * - ID normalization
- * - Dependency-field tolerance
+ * MSP Lite UI — App.jsx (full, corrected + improved)
+ * Includes:
+ * - Recalculate loading overlay + spinner
+ * - Formal UI styling (cards/buttons/table polish)
+ * - Adaptive Gantt X-axis ticks (prevents clutter)
+ * - ID normalization + dependency-field tolerance
  */
 
 export default function App() {
@@ -176,7 +174,7 @@ export default function App() {
       }
 
       // ✅ Schedule payload tolerance:
-      // Most common: sch.json = { ok:true, project:{...}, tasks:[...], version:{...} }
+      // Typically: sch.json = { ok:true, project:{...}, tasks:[...], version:{...} }
       setSchedule(sch.json);
 
       // ✅ Deps payload tolerance:
@@ -329,6 +327,7 @@ export default function App() {
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
 
+      {/* Recalculate overlay */}
       {isRecalculating && (
         <div
           style={{
@@ -356,7 +355,7 @@ export default function App() {
           >
             <Spinner size={18} />
             <div style={{ display: "flex", flexDirection: "column" }}>
-              <div style={{ fontWeight: 800, color: "#0f172a" }}>Recalculating schedule</div>
+              <div style={{ fontWeight: 900, color: "#0f172a" }}>Recalculating schedule</div>
               <div style={{ fontSize: 12, color: "#475569" }}>
                 Computing ES/EF/LS/LF, float, and critical path…
               </div>
@@ -385,7 +384,7 @@ export default function App() {
           boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
         }}
       >
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 700 }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 800 }}>
           Project ID
           <input
             value={projectId}
@@ -394,7 +393,11 @@ export default function App() {
           />
         </label>
 
-        <button onClick={loadAll} disabled={loading} style={{ ...btn, ...(loading ? btnDisabled : {}) }}>
+        <button
+          onClick={loadAll}
+          disabled={loading}
+          style={{ ...btn, ...(loading ? btnDisabled : {}) }}
+        >
           {loading && !isRecalculating ? (
             <>
               <Spinner size={14} /> Loading
@@ -435,7 +438,7 @@ export default function App() {
         </button>
 
         {version && (
-          <div style={{ marginLeft: "auto", fontSize: 12, color: "#334155", fontWeight: 700 }}>
+          <div style={{ marginLeft: "auto", fontSize: 12, color: "#334155", fontWeight: 800 }}>
             Version {version.versionNo} &nbsp;|&nbsp; Finish Day {version.projectFinishDay} &nbsp;|&nbsp;
             Critical {criticalCount}/{tasks.length}
           </div>
@@ -451,14 +454,14 @@ export default function App() {
             color: "#991b1b",
             padding: "10px 12px",
             borderRadius: 12,
-            fontWeight: 700,
+            fontWeight: 800,
           }}
         >
           Error: {error}
         </div>
       )}
 
-      <div style={{ marginTop: 10, color: "#475569", fontSize: 12, fontWeight: 700 }}>
+      <div style={{ marginTop: 10, color: "#475569", fontSize: 12, fontWeight: 800 }}>
         Tasks: {tasks.length} &nbsp;|&nbsp; Dependencies: {deps.length}
       </div>
 
@@ -544,7 +547,14 @@ export default function App() {
                   taskById={taskById}
                   depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
                   disabled={loading}
-                  getDepId={getDepId}
+                  getDepId={(d) =>
+                    d.TaskDependencyId ??
+                    d.TaskDependencyID ??
+                    d.taskDependencyId ??
+                    d.taskDependencyID ??
+                    d.DependencyId ??
+                    d.dependencyId
+                  }
                   getPredId={getPredId}
                   getLag={getLag}
                   getType={getType}
@@ -655,7 +665,7 @@ function TaskRow({
   return (
     <tr style={{ background: isCrit ? critBg : rowBg }}>
       <td style={cell()}>{task.Workstream ?? ""}</td>
-      <td style={cell({ fontWeight: 800 })}>{task.TaskName ?? ""}</td>
+      <td style={cell({ fontWeight: 900 })}>{task.TaskName ?? ""}</td>
 
       <td style={cell()}>
         <input
@@ -675,10 +685,10 @@ function TaskRow({
             marginLeft: 8,
             padding: "6px 10px",
             borderRadius: 10,
-            border: "1px solid #cbd5e1",
+            border: "1px solid #0f172a",
             background: "#0f172a",
             color: "#fff",
-            fontWeight: 800,
+            fontWeight: 900,
             cursor: disabled ? "not-allowed" : "pointer",
             opacity: disabled ? 0.55 : 1,
           }}
@@ -704,7 +714,8 @@ function TaskRow({
         ) : (
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {depsForTask.map((d) => {
-              const depId = d.__id ?? getDepId(d); // numeric or null
+              const depIdRaw = getDepId(d);
+              const depId = Number(depIdRaw);
               const predIdRaw = getPredId(d);
               const pred = taskById.get(predIdRaw == null ? null : String(predIdRaw));
               const predName = pred
@@ -713,8 +724,8 @@ function TaskRow({
 
               return (
                 <DepEditor
-                  key={String(depId ?? `${predIdRaw}_${Math.random()}`)}
-                  depId={depId}
+                  key={String(Number.isFinite(depId) ? depId : `${predIdRaw}_${Math.random()}`)}
+                  depId={Number.isFinite(depId) ? depId : null}
                   predName={predName}
                   initialType={getType(d)}
                   initialLag={getLag(d)}
@@ -774,7 +785,7 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
     border: "1px solid #cbd5e1",
     background: "#ffffff",
     color: "#0f172a",
-    fontWeight: 800,
+    fontWeight: 900,
     cursor: disabled || !canEdit ? "not-allowed" : "pointer",
     opacity: disabled || !canEdit ? 0.55 : 1,
   };
@@ -789,7 +800,7 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
   return (
     <li style={{ marginBottom: 8 }}>
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-        <span style={{ display: "inline-block", minWidth: 260, fontWeight: 700, color: "#0f172a" }}>
+        <span style={{ display: "inline-block", minWidth: 260, fontWeight: 800, color: "#0f172a" }}>
           {predName}
         </span>
 
@@ -826,7 +837,7 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
         </button>
 
         {!canEdit && (
-          <span style={{ marginLeft: 6, color: "#b91c1c", fontSize: 12, fontWeight: 800 }}>
+          <span style={{ marginLeft: 6, color: "#b91c1c", fontSize: 12, fontWeight: 900 }}>
             Missing TaskDependencyId in getDependencies API
           </span>
         )}
@@ -836,7 +847,7 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
 }
 
 /** =========================
- *  Gantt (Linked)
+ *  Gantt (Linked) — Adaptive X-axis ticks
  *  ========================= */
 function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
   const normId = (v) => (v == null ? null : String(v));
@@ -862,6 +873,15 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
   const maxFinish = Math.max(...valid.map((t) => t.EF));
   const totalDays = Math.max(1, maxFinish - minStart);
   const timelineW = totalDays * PX_PER_DAY;
+
+  // Adaptive tick step to avoid clutter
+  const pickTickStep = (pxPerDay) => {
+    const minLabelPx = 80; // increase -> fewer labels
+    const raw = Math.ceil(minLabelPx / Math.max(1, pxPerDay));
+    const nice = [1, 2, 3, 5, 7, 10, 14, 21, 28, 30];
+    return nice.find((s) => s >= raw) || raw;
+  };
+  const TICK_STEP = pickTickStep(PX_PER_DAY);
 
   const rowIndexByTaskId = new Map();
   valid.forEach((t, idx) => rowIndexByTaskId.set(normId(t.TaskId), idx));
@@ -889,9 +909,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
 
   return (
     <div style={{ marginTop: 22 }}>
-      <div style={{ fontWeight: 900, marginBottom: 10 }}>
-        Gantt (Linked) — Links: {links.length}
-      </div>
+      <div style={{ fontWeight: 900, marginBottom: 10 }}>Gantt (Linked) — Links: {links.length}</div>
 
       <div
         style={{
@@ -925,10 +943,11 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
               top: 0,
               height: HEADER_H,
               width: timelineW,
+              background: "#ffffff",
             }}
           >
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
-              if (i % 5 !== 0) return null;
+              if (i % TICK_STEP !== 0) return null;
               const day = minStart + i;
               return (
                 <div
@@ -941,8 +960,9 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                     borderLeft: "1px solid #eef2f7",
                     fontSize: 11,
                     color: "#64748b",
-                    paddingLeft: 2,
+                    paddingLeft: 6,
                     whiteSpace: "nowrap",
+                    userSelect: "none",
                   }}
                 >
                   {day}
@@ -1005,7 +1025,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                   }}
                 >
                   <div style={{ width: LEFT_COL_W, paddingRight: 10 }}>
-                    <div style={{ fontWeight: 800 }}>{t.TaskName}</div>
+                    <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
                     <div style={{ fontSize: 12, color: "#64748b" }}>
                       {t.Workstream} | ES {t.ES} EF {t.EF}
                     </div>
@@ -1019,8 +1039,25 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                       background: "#fafafa",
                       border: "1px solid #f1f5f9",
                       borderRadius: 8,
+                      overflow: "hidden",
                     }}
                   >
+                    {/* Minor grid (unlabeled) */}
+                    {Array.from({ length: totalDays + 1 }).map((_, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          position: "absolute",
+                          left: i * PX_PER_DAY,
+                          top: 0,
+                          bottom: 0,
+                          width: 1,
+                          background: i % TICK_STEP === 0 ? "#e2e8f0" : "#f1f5f9",
+                          opacity: i % TICK_STEP === 0 ? 1 : 0.8,
+                        }}
+                      />
+                    ))}
+
                     <div
                       style={{
                         position: "absolute",
@@ -1030,6 +1067,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                         width,
                         borderRadius: 6,
                         background: isCrit ? "#f59e0b" : "#94a3b8",
+                        zIndex: 2,
                       }}
                     />
                   </div>
