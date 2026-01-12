@@ -30,9 +30,23 @@ export default function App() {
   // Still tolerate other shapes just in case.
   const scheduleObj = schedule?.project ?? schedule;
 
-  const project = schedule?.project ?? schedule; // tolerate both shapes
-  const tasks = project?.tasks ?? project?.Tasks ?? [];
-  const version = project?.version ?? project?.Version ?? null;
+ // Your API returns tasks + version at the ROOT (not inside project)
+const project = schedule?.project ?? null;
+
+const tasks =
+  schedule?.tasks ??
+  schedule?.project?.tasks ??   // tolerance if backend changes later
+  schedule?.Tasks ??
+  schedule?.project?.Tasks ??
+  [];
+
+const version =
+  schedule?.version ??
+  schedule?.project?.version ?? // tolerance
+  schedule?.Version ??
+  schedule?.project?.Version ??
+  null;
+
 
   const criticalCount = useMemo(() => {
     return tasks.filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
@@ -169,10 +183,7 @@ export default function App() {
 
       // ✅ Schedule payload tolerance:
       // Most common: sch.json.project (your API)
-      const schedulePayload =
-        sch.json?.project ?? sch.json?.schedule?.project ?? sch.json?.data?.project ?? sch.json?.data ?? sch.json;
-      
-      setSchedule(schedulePayload);
+      setSchedule(sch.json);
 
       // ✅ Deps payload tolerance:
       const depsPayload =
