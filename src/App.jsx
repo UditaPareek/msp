@@ -3,15 +3,50 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite UI — App.jsx (full, corrected + improved)
- * Includes:
- * - Recalculate loading overlay + spinner
- * - Formal UI styling (cards/buttons/table polish)
- * - Adaptive Gantt X-axis ticks (prevents clutter)
- * - ID normalization + dependency-field tolerance
+ * MSP Lite UI — App.jsx (professional shell + New Project flow)
+ *
+ * What this version adds (without breaking your existing APIs):
+ * - Top navigation like MSP tools: Dashboard / Gantt / Network / Resources / Risks / Reports
+ * - "+ New Project" modal that calls POST /createProject (your new function)
+ * - Milestone capture (LOI, Design Handover, etc.) + COMM_CONTRACT required
+ * - Internal commissioning derived = Contract - 30 days (fixed policy) shown in UI
+ * - Existing task edit flows preserved (duration, dependency type/lag, delete dependency)
+ * - Adaptive Gantt ticks to avoid clutter
+ *
+ * Assumed APIs:
+ * - GET  /getSchedule?projectId=...&versionId=latest
+ * - GET  /getDependencies?projectId=...
+ * - POST /updateTask
+ * - POST /updateDependency
+ * - POST /deleteDependency
+ * - POST /createProject   (NEW)
+ * - POST /recalculate?projectId=... (optional; kept for debug)
  */
 
+const TABS = [
+  { key: "dashboard", label: "Dashboard" },
+  { key: "gantt", label: "Gantt Chart" },
+  { key: "network", label: "Network" },
+  { key: "resources", label: "Resources" },
+  { key: "risks", label: "Risks" },
+  { key: "reports", label: "Reports" },
+];
+
+const MILESTONE_FIELDS = [
+  { key: "LOI", label: "LOI" },
+  { key: "DES_HANDOVER", label: "Design Handover Date" },
+  { key: "LAND_BOUNDARY", label: "Final Land Boundary" },
+  { key: "INV_FINAL", label: "Inverter Finalisation" },
+  { key: "MOD_FINAL", label: "Module Finalisation" },
+  { key: "GSS_END_SLD", label: "GSS End SLD" },
+  { key: "LOCAL_APPROVAL_DWG", label: "Local State Approved Equipment Structure Drawing" },
+  { key: "GSS_INPUTS_CHECKLIST", label: "Filled Checklist of GSS Inputs" },
+  { key: "COMM_CONTRACT", label: "Commissioning (as per Contract)", required: true },
+];
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState("dashboard");
+
   const [projectId, setProjectId] = useState("1");
   const [loading, setLoading] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
@@ -20,37 +55,27 @@ export default function App() {
   const [schedule, setSchedule] = useState(null);
   const [deps, setDeps] = useState([]);
 
-  // toggles
-  const [showNetwork, setShowNetwork] = useState(false);
-  const [showGantt, setShowGantt] = useState(true);
+  const [showNewProject, setShowNewProject] = useState(false);
 
-  // Normalize IDs as strings for consistent Map lookups
+  // Normalize IDs as strings
   const normId = (v) => (v == null ? null : String(v));
 
-  // Your API returns tasks + version at the ROOT (not inside project)
+  // Tasks + version tolerance
   const tasks =
     schedule?.tasks ??
-    schedule?.project?.tasks ?? // tolerance if backend changes later
+    schedule?.project?.tasks ??
     schedule?.Tasks ??
     schedule?.project?.Tasks ??
     [];
 
   const version =
     schedule?.version ??
-    schedule?.project?.version ?? // tolerance
+    schedule?.project?.version ??
     schedule?.Version ??
     schedule?.project?.Version ??
     null;
 
-  const criticalCount = useMemo(() => {
-    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
-  }, [tasks]);
-
-  const taskById = useMemo(() => {
-    const m = new Map();
-    for (const t of tasks || []) m.set(normId(t.TaskId), t);
-    return m;
-  }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+  const project = schedule?.project ?? null;
 
   /** =========================
    *  Dependency field tolerance
@@ -75,7 +100,6 @@ export default function App() {
     d.succTaskId ??
     d.succId;
 
-  // IMPORTANT: do NOT create synthetic IDs like dep_${i}
   const getDepId = (d) => {
     const raw =
       d.TaskDependencyId ??
@@ -84,12 +108,10 @@ export default function App() {
       d.taskDependencyID ??
       d.DependencyId ??
       d.dependencyId;
-
     const n = Number(raw);
-    return Number.isFinite(n) ? n : null; // null if missing
+    return Number.isFinite(n) ? n : null;
   };
 
-  // DB column: LinkType, but tolerate older names
   const getType = (d) =>
     String(
       d.LinkType ??
@@ -107,22 +129,31 @@ export default function App() {
     return Number.isFinite(n) ? n : 0;
   };
 
-  // Map successor -> deps
+  const criticalCount = useMemo(() => {
+    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
+  }, [tasks]);
+
+  const taskById = useMemo(() => {
+    const m = new Map();
+    for (const t of tasks || []) m.set(normId(t.TaskId), t);
+    return m;
+  }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // successor -> deps
   const depsBySuccessor = useMemo(() => {
     const m = new Map();
     (deps || []).forEach((d) => {
       const succ = normId(getSuccId(d));
       if (succ == null) return;
-
       const arr = m.get(succ) || [];
-      arr.push({ ...d, __id: getDepId(d) }); // depId can be null
+      arr.push({ ...d, __id: getDepId(d) });
       m.set(succ, arr);
     });
     return m;
   }, [deps]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** =========================
-   *  Fetch helpers (NO CACHE)
+   *  Fetch helpers
    *  ========================= */
   async function safeJson(res) {
     const text = await res.text();
@@ -151,33 +182,25 @@ export default function App() {
   /** =========================
    *  Load / Recalc / Updates
    *  ========================= */
-  async function loadAll() {
+  async function loadAll(nextProjectId = projectId) {
     setError("");
     setLoading(true);
     try {
       const bust = Date.now();
-
       const [sch, dep] = await Promise.all([
         fetchJson(
           `${API_BASE}/getSchedule?projectId=${encodeURIComponent(
-            projectId
+            nextProjectId
           )}&versionId=latest&t=${bust}`
         ),
-        fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(projectId)}&t=${bust}`),
+        fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(nextProjectId)}&t=${bust}`),
       ]);
 
-      if (!sch.res.ok || !sch.json?.ok) {
-        throw new Error(sch.json?.error || "Failed to load schedule");
-      }
-      if (!dep.res.ok || !dep.json?.ok) {
-        throw new Error(dep.json?.error || "Failed to load dependencies");
-      }
+      if (!sch.res.ok || !sch.json?.ok) throw new Error(sch.json?.error || "Failed to load schedule");
+      if (!dep.res.ok || !dep.json?.ok) throw new Error(dep.json?.error || "Failed to load dependencies");
 
-      // ✅ Schedule payload tolerance:
-      // Typically: sch.json = { ok:true, project:{...}, tasks:[...], version:{...} }
       setSchedule(sch.json);
 
-      // ✅ Deps payload tolerance:
       const depsPayload =
         dep.json?.dependencies ??
         dep.json?.deps ??
@@ -196,22 +219,22 @@ export default function App() {
     }
   }
 
-  async function recalcOnly() {
+  async function recalcOnly(nextProjectId = projectId) {
     const { res, json } = await fetchJson(
-      `${API_BASE}/recalculate?projectId=${encodeURIComponent(projectId)}&t=${Date.now()}`,
+      `${API_BASE}/recalculate?projectId=${encodeURIComponent(nextProjectId)}&t=${Date.now()}`,
       { method: "POST" }
     );
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Recalculate failed");
     return json;
   }
 
-  async function recalcAndReload() {
+  async function recalcAndReload(nextProjectId = projectId) {
     setError("");
     setIsRecalculating(true);
     setLoading(true);
     try {
-      await recalcOnly();
-      await loadAll();
+      await recalcOnly(nextProjectId);
+      await loadAll(nextProjectId);
     } catch (e) {
       setError(e.message || String(e));
     } finally {
@@ -231,9 +254,7 @@ export default function App() {
 
   async function updateDependency(taskDependencyId, linkType, lagDays) {
     const idNum = Number(taskDependencyId);
-    if (!Number.isFinite(idNum)) {
-      throw new Error("Invalid TaskDependencyId (API is not returning it).");
-    }
+    if (!Number.isFinite(idNum)) throw new Error("Invalid TaskDependencyId (API is not returning it).");
 
     const type = String(linkType || "FS").toUpperCase();
     const lagNum = Number.isFinite(Number(lagDays)) ? Number(lagDays) : 0;
@@ -266,353 +287,824 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
   }
 
+  async function createProject(payload) {
+    const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Create project failed");
+    return json;
+  }
+
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** =========================
-   *  Styling helpers
+   *  Styling
    *  ========================= */
-  const btn = {
-    padding: "8px 12px",
-    borderRadius: 10,
-    border: "1px solid #cbd5e1",
-    background: "#ffffff",
-    color: "#0f172a",
-    fontWeight: 700,
-    cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-  };
+  const styles = useMemo(() => makeStyles(), []);
 
-  const btnPrimary = {
-    ...btn,
-    background: "#0f172a",
-    color: "#ffffff",
-    border: "1px solid #0f172a",
-  };
+  const kpi = useMemo(() => {
+    const totalTasks = tasks.length || 0;
+    const completed = (tasks || []).filter((t) => String(t.Status || "").toUpperCase() === "COMPLETED").length;
+    const avgCompletion = totalTasks ? Math.round((completed / totalTasks) * 100) : 0;
 
-  const btnDisabled = {
-    opacity: 0.55,
-    cursor: "not-allowed",
-  };
+    // crude: unique resources placeholder (you need a Resource API to do real count)
+    const resources = 0;
 
-  const inputStyle = {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid #cbd5e1",
-    background: "#ffffff",
-    outline: "none",
-  };
+    return {
+      activeProjects: 1, // because UI is focused on current project; you need a project list API for portfolio
+      totalTasks,
+      resources,
+      avgCompletion,
+      critical: criticalCount,
+    };
+  }, [tasks, criticalCount]);
 
   /** =========================
-   *  UI
+   *  Render
    *  ========================= */
   return (
-    <div
-      style={{
-        padding: 24,
-        fontFamily:
-          'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif',
-        maxWidth: 1600,
-        margin: "0 auto",
-        color: "#0f172a",
-        background: "#f8fafc",
-        minHeight: "100vh",
-      }}
-    >
-      <style>{`
-        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-      `}</style>
+    <div style={styles.page}>
+      <GlobalCSS />
 
-      {/* Recalculate overlay */}
+      {/* Overlay */}
       {isRecalculating && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.25)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-          }}
-        >
-          <div
-            style={{
-              background: "#ffffff",
-              border: "1px solid #e2e8f0",
-              borderRadius: 12,
-              padding: "16px 18px",
-              minWidth: 340,
-              boxShadow: "0 10px 25px rgba(0,0,0,0.12)",
-              display: "flex",
-              gap: 12,
-              alignItems: "center",
-            }}
-          >
+        <div style={styles.overlay}>
+          <div style={styles.overlayCard}>
             <Spinner size={18} />
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <div style={{ fontWeight: 900, color: "#0f172a" }}>Recalculating schedule</div>
-              <div style={{ fontSize: 12, color: "#475569" }}>
-                Computing ES/EF/LS/LF, float, and critical path…
-              </div>
+            <div>
+              <div style={styles.overlayTitle}>Recalculating schedule</div>
+              <div style={styles.overlaySub}>Computing ES/EF/LS/LF, float, critical path…</div>
             </div>
           </div>
         </div>
       )}
 
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 20, fontWeight: 900 }}>MSP Lite UI</div>
-        <div style={{ fontSize: 12, color: "#475569" }}>
-          Schedule viewer and editor for Duration and Dependency attributes
+      {/* Top Nav */}
+      <div style={styles.topbar}>
+        <div style={styles.brandWrap}>
+          <div style={styles.brandDot} />
+          <div>
+            <div style={styles.brandTitle}>MSP Lite</div>
+            <div style={styles.brandSub}>Project scheduling & network planning</div>
+          </div>
+        </div>
+
+        <div style={styles.tabs}>
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              style={{
+                ...styles.tabBtn,
+                ...(activeTab === t.key ? styles.tabBtnActive : {}),
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={styles.topActions}>
+          <button
+            style={styles.btnPrimary}
+            onClick={() => setShowNewProject(true)}
+            disabled={loading}
+            title="Create new project from template"
+          >
+            + New Project
+          </button>
         </div>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          flexWrap: "wrap",
-          background: "#ffffff",
-          border: "1px solid #e2e8f0",
-          borderRadius: 12,
-          padding: 12,
-          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-        }}
-      >
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 800 }}>
-          Project ID
-          <input
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            style={{ ...inputStyle, width: 90 }}
-          />
-        </label>
+      {/* Header / Project Bar */}
+      <div style={styles.content}>
+        <div style={styles.projectBar}>
+          <div style={styles.projectLeft}>
+            <div style={styles.projectName}>
+              {project?.ProjectName ? project.ProjectName : "Select / Load Project"}
+            </div>
+            <div style={styles.projectMeta}>
+              <span>ProjectId: {project?.ProjectId ?? projectId}</span>
+              <span>•</span>
+              <span>Version: {version?.versionNo ?? "-"}</span>
+              <span>•</span>
+              <span>Finish Day: {version?.projectFinishDay ?? "-"}</span>
+              <span>•</span>
+              <span>Critical: {kpi.critical}/{kpi.totalTasks}</span>
+            </div>
+          </div>
 
-        <button
-          onClick={loadAll}
-          disabled={loading}
-          style={{ ...btn, ...(loading ? btnDisabled : {}) }}
-        >
-          {loading && !isRecalculating ? (
-            <>
-              <Spinner size={14} /> Loading
-            </>
-          ) : (
-            "Load"
-          )}
-        </button>
+          <div style={styles.projectRight}>
+            <label style={styles.inlineLabel}>
+              Project ID
+              <input
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value)}
+                style={styles.input}
+              />
+            </label>
 
-        <button
-          onClick={recalcAndReload}
-          disabled={loading}
-          style={{ ...btnPrimary, ...(loading ? btnDisabled : {}) }}
-        >
-          {isRecalculating ? (
-            <>
-              <Spinner size={14} /> Recalculating
-            </>
-          ) : (
-            "Recalculate"
-          )}
-        </button>
+            <button
+              onClick={() => loadAll(projectId)}
+              disabled={loading}
+              style={{ ...styles.btn, ...(loading ? styles.btnDisabled : {}) }}
+            >
+              {loading && !isRecalculating ? (
+                <>
+                  <Spinner size={14} /> Loading
+                </>
+              ) : (
+                "Load"
+              )}
+            </button>
 
-        <button
-          onClick={() => setShowNetwork((v) => !v)}
-          disabled={loading || tasks.length === 0}
-          style={{ ...btn, ...((loading || tasks.length === 0) ? btnDisabled : {}) }}
-        >
-          {showNetwork ? "Hide Network Diagram" : "Show Network Diagram"}
-        </button>
+            <button
+              onClick={() => recalcAndReload(projectId)}
+              disabled={loading}
+              style={{ ...styles.btnDark, ...(loading ? styles.btnDisabled : {}) }}
+              title="Debug recalculation (ideally auto-trigger on edits in backend)"
+            >
+              {isRecalculating ? (
+                <>
+                  <Spinner size={14} /> Recalculating
+                </>
+              ) : (
+                "Recalculate"
+              )}
+            </button>
+          </div>
+        </div>
 
-        <button
-          onClick={() => setShowGantt((v) => !v)}
-          disabled={loading || tasks.length === 0}
-          style={{ ...btn, ...((loading || tasks.length === 0) ? btnDisabled : {}) }}
-        >
-          {showGantt ? "Hide Gantt Chart" : "Show Gantt Chart"}
-        </button>
+        {/* Error */}
+        {error && <div style={styles.error}>Error: {error}</div>}
 
-        {version && (
-          <div style={{ marginLeft: "auto", fontSize: 12, color: "#334155", fontWeight: 800 }}>
-            Version {version.versionNo} &nbsp;|&nbsp; Finish Day {version.projectFinishDay} &nbsp;|&nbsp;
-            Critical {criticalCount}/{tasks.length}
+        {/* TAB CONTENT */}
+        {activeTab === "dashboard" && (
+          <>
+            <div style={styles.card}>
+              <div style={styles.cardHeader}>
+                <div style={styles.cardTitle}>Portfolio Overview</div>
+              </div>
+
+              <div style={styles.kpiGrid}>
+                <KpiCard label="Active Projects" value={kpi.activeProjects} />
+                <KpiCard label="Total Tasks" value={kpi.totalTasks} />
+                <KpiCard label="Resources" value={kpi.resources} hint="(coming via Resource API)" />
+                <KpiCard label="Avg Completion" value={`${kpi.avgCompletion}%`} />
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 14, marginTop: 14 }}>
+              <div style={styles.card}>
+                <div style={styles.cardHeader}>
+                  <div style={styles.cardTitle}>Timeline Snapshot</div>
+                  <div style={styles.cardSub}>
+                    Gantt preview (critical highlighted). Use the Gantt tab for full view.
+                  </div>
+                </div>
+                {tasks.length ? (
+                  <GanttLiteLinked
+                    compact
+                    tasks={tasks}
+                    deps={deps}
+                    getPredId={getPredId}
+                    getSuccId={getSuccId}
+                    getDepId={getDepId}
+                  />
+                ) : (
+                  <EmptyState text="No schedule loaded yet." />
+                )}
+              </div>
+
+              <div style={styles.card}>
+                <div style={styles.cardHeader}>
+                  <div style={styles.cardTitle}>Critical Path Summary</div>
+                  <div style={styles.cardSub}>Top critical tasks (float = 0)</div>
+                </div>
+
+                {tasks.length ? (
+                  <div style={{ padding: 12 }}>
+                    {(tasks || [])
+                      .filter((t) => t.IsCritical === 1 || t.IsCritical === true)
+                      .slice(0, 10)
+                      .map((t) => (
+                        <div key={normId(t.TaskId)} style={styles.listRow}>
+                          <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
+                          <div style={styles.listMeta}>
+                            {t.Workstream} • ES {t.ES ?? "-"} • EF {t.EF ?? "-"}
+                          </div>
+                        </div>
+                      ))}
+                    {(tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length === 0 && (
+                      <div style={styles.muted}>No critical tasks found (unexpected). Check schedule.</div>
+                    )}
+                  </div>
+                ) : (
+                  <EmptyState text="Load a project to see critical path." />
+                )}
+              </div>
+            </div>
+
+            <div style={styles.card} style={{ ...styles.card, marginTop: 14 }}>
+              <div style={styles.cardHeader}>
+                <div style={styles.cardTitle}>Task Table (Edit Durations & Dependencies)</div>
+                <div style={styles.cardSub}>
+                  MSP behavior should be: edit → backend recalculates → UI reloads latest version.
+                </div>
+              </div>
+              <TaskTable
+                tasks={tasks}
+                depsBySuccessor={depsBySuccessor}
+                taskById={taskById}
+                loading={loading}
+                getPredId={getPredId}
+                getLag={getLag}
+                getType={getType}
+                onSaveDuration={async (taskId, newDur) => {
+                  setError("");
+                  setLoading(true);
+                  try {
+                    await updateDuration(taskId, newDur);
+                    await recalcAndReload(projectId);
+                  } catch (e) {
+                    setError(e.message || String(e));
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                onUpdateDep={async (depId, type, lag) => {
+                  setError("");
+                  setLoading(true);
+                  try {
+                    await updateDependency(depId, type, lag);
+                    await recalcAndReload(projectId);
+                  } catch (e) {
+                    setError(e.message || String(e));
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                onRemoveDep={async (depId) => {
+                  setError("");
+                  setLoading(true);
+                  try {
+                    await deleteDependency(depId);
+                    await recalcAndReload(projectId);
+                  } catch (e) {
+                    setError(e.message || String(e));
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+              />
+            </div>
+          </>
+        )}
+
+        {activeTab === "gantt" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitle}>Gantt Chart</div>
+              <div style={styles.cardSub}>Linked visualization using computed ES/EF</div>
+            </div>
+            {tasks.length ? (
+              <GanttLiteLinked
+                tasks={tasks}
+                deps={deps}
+                getPredId={getPredId}
+                getSuccId={getSuccId}
+                getDepId={getDepId}
+              />
+            ) : (
+              <EmptyState text="Load a project to view the Gantt." />
+            )}
+          </div>
+        )}
+
+        {activeTab === "network" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitle}>Network Diagram</div>
+              <div style={styles.cardSub}>DAG layout using Dagre (dependency-driven)</div>
+            </div>
+            {tasks.length ? (
+              <NetworkDiagram
+                tasks={tasks}
+                deps={deps}
+                getPredId={getPredId}
+                getSuccId={getSuccId}
+                getDepId={getDepId}
+                getLag={getLag}
+                getType={getType}
+              />
+            ) : (
+              <EmptyState text="Load a project to view the network." />
+            )}
+          </div>
+        )}
+
+        {activeTab === "resources" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitle}>Resources</div>
+              <div style={styles.cardSub}>
+                Not implemented yet (requires Resource tables + API). Keep UI placeholder here.
+              </div>
+            </div>
+            <EmptyState text="Add Resource model + endpoints to enable this tab." />
+          </div>
+        )}
+
+        {activeTab === "risks" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitle}>Risks</div>
+              <div style={styles.cardSub}>
+                Next step: show critical tasks, negative float, late tasks, long chains.
+              </div>
+            </div>
+            {tasks.length ? (
+              <div style={{ padding: 12 }}>
+                <div style={styles.sectionTitle}>Critical Tasks</div>
+                <div style={styles.muted}>
+                  You can enhance this after backend auto-versioning is added to updateTask/updateDependency.
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  {(tasks || [])
+                    .filter((t) => t.IsCritical === 1 || t.IsCritical === true)
+                    .slice(0, 15)
+                    .map((t) => (
+                      <div key={normId(t.TaskId)} style={styles.riskRow}>
+                        <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
+                        <div style={styles.listMeta}>
+                          {t.Workstream} • ES {t.ES ?? "-"} • EF {t.EF ?? "-"} • Float {t.TotalFloat ?? "-"}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ) : (
+              <EmptyState text="Load a project to view risks." />
+            )}
+          </div>
+        )}
+
+        {activeTab === "reports" && (
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <div style={styles.cardTitle}>Reports</div>
+              <div style={styles.cardSub}>
+                Next step: export schedule versions, baseline variance, critical path report.
+              </div>
+            </div>
+            <EmptyState text="Add report endpoints later. UI is ready." />
           </div>
         )}
       </div>
 
-      {error && (
-        <div
-          style={{
-            marginTop: 12,
-            background: "#fef2f2",
-            border: "1px solid #fecaca",
-            color: "#991b1b",
-            padding: "10px 12px",
-            borderRadius: 12,
-            fontWeight: 800,
+      {/* New Project Modal */}
+      {showNewProject && (
+        <NewProjectModal
+          onClose={() => setShowNewProject(false)}
+          onCreate={async ({ projectName, templateName, milestones }) => {
+            setError("");
+            setLoading(true);
+            try {
+              const out = await createProject({ projectName, templateName, milestones });
+              // Immediately load this project
+              const newId = String(out.projectId);
+              setProjectId(newId);
+              setShowNewProject(false);
+              // Load schedule
+              await loadAll(newId);
+              setActiveTab("dashboard");
+            } catch (e) {
+              setError(e.message || String(e));
+            } finally {
+              setLoading(false);
+            }
           }}
-        >
-          Error: {error}
+          loading={loading}
+        />
+      )}
+    </div>
+  );
+}
+
+/** =========================
+ *  Global CSS
+ *  ========================= */
+function GlobalCSS() {
+  return (
+    <style>{`
+      * { box-sizing: border-box; }
+      button { font-family: inherit; }
+      input, select { font-family: inherit; }
+      ::-webkit-scrollbar { height: 10px; width: 10px; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 12px; }
+      ::-webkit-scrollbar-track { background: #f1f5f9; }
+      @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    `}</style>
+  );
+}
+
+/** =========================
+ *  New Project Modal
+ *  ========================= */
+function NewProjectModal({ onClose, onCreate, loading }) {
+  const [projectName, setProjectName] = useState("");
+  const [templateName, setTemplateName] = useState("Solar EPC Master v1");
+  const [milestones, setMilestones] = useState(() => {
+    const o = {};
+    for (const f of MILESTONE_FIELDS) o[f.key] = "";
+    return o;
+  });
+
+  // Derived internal commissioning (Contract - 30d)
+  const commContract = milestones.COMM_CONTRACT;
+  const commInternal = useMemo(() => {
+    const d = parseISODate(commContract);
+    if (!d) return "";
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate() - 30);
+    return toISODate(x);
+  }, [commContract]);
+
+  const canSubmit = useMemo(() => {
+    return projectName.trim().length > 0 && !!parseISODate(milestones.COMM_CONTRACT);
+  }, [projectName, milestones.COMM_CONTRACT]);
+
+  const s = makeStyles();
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div
+        style={s.modal}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div style={s.modalHeader}>
+          <div>
+            <div style={s.modalTitle}>Create New Project</div>
+            <div style={s.modalSub}>
+              Captures milestones and generates tasks from the template.
+            </div>
+          </div>
+          <button style={s.iconBtn} onClick={onClose} disabled={loading} title="Close">
+            ✕
+          </button>
         </div>
-      )}
 
-      <div style={{ marginTop: 10, color: "#475569", fontSize: 12, fontWeight: 800 }}>
-        Tasks: {tasks.length} &nbsp;|&nbsp; Dependencies: {deps.length}
-      </div>
+        <div style={s.modalBody}>
+          <div style={s.formGrid}>
+            <Field label="Project Name" required>
+              <input
+                style={s.inputWide}
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="e.g., Serentica Fatehgarh (300MW)"
+              />
+            </Field>
 
-      {showNetwork && tasks.length > 0 && (
-        <NetworkDiagram
-          tasks={tasks}
-          deps={deps}
-          getPredId={getPredId}
-          getSuccId={getSuccId}
-          getDepId={getDepId}
-          getLag={getLag}
-          getType={getType}
-        />
-      )}
+            <Field label="Template Name">
+              <input
+                style={s.inputWide}
+                value={templateName}
+                onChange={(e) => setTemplateName(e.target.value)}
+                placeholder="Solar EPC Master v1"
+              />
+            </Field>
+          </div>
 
-      {showGantt && tasks.length > 0 && (
-        <GanttLiteLinked
-          tasks={tasks}
-          deps={deps}
-          getPredId={getPredId}
-          getSuccId={getSuccId}
-          getDepId={getDepId}
-        />
-      )}
+          <div style={{ marginTop: 12 }}>
+            <div style={s.sectionTitle}>Milestones</div>
+            <div style={s.sectionSub}>
+              Commissioning (as per Contract) is mandatory. Internal commissioning is derived as Contract - 30 days.
+            </div>
 
-      <div style={{ marginTop: 18 }}>
-        <div style={{ fontWeight: 900, marginBottom: 10 }}>Task Table</div>
-
-        <div
-          style={{
-            background: "#ffffff",
-            border: "1px solid #e2e8f0",
-            borderRadius: 12,
-            overflow: "hidden",
-            boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-          }}
-        >
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "separate",
-              borderSpacing: 0,
-              fontSize: 13,
-            }}
-          >
-            <thead style={{ background: "#f1f5f9" }}>
-              <tr>
-                {[
-                  "Workstream",
-                  "Task",
-                  "Dur",
-                  "ES",
-                  "EF",
-                  "LS",
-                  "LF",
-                  "Float",
-                  "Critical",
-                  "Dependencies (Edit Type + Lag)",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    style={{
-                      textAlign: "left",
-                      padding: "10px 10px",
-                      borderBottom: "1px solid #e2e8f0",
-                      fontWeight: 900,
-                      color: "#0f172a",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-
-            <tbody>
-              {tasks.map((t, idx) => (
-                <TaskRow
-                  key={normId(t.TaskId)}
-                  rowIndex={idx}
-                  task={t}
-                  taskById={taskById}
-                  depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
-                  disabled={loading}
-                  getDepId={(d) =>
-                    d.TaskDependencyId ??
-                    d.TaskDependencyID ??
-                    d.taskDependencyId ??
-                    d.taskDependencyID ??
-                    d.DependencyId ??
-                    d.dependencyId
-                  }
-                  getPredId={getPredId}
-                  getLag={getLag}
-                  getType={getType}
-                  onSaveDuration={async (newDur) => {
-                    setError("");
-                    setLoading(true);
-                    try {
-                      await updateDuration(t.TaskId, newDur);
-                      await recalcAndReload();
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setLoading(false);
+            <div style={s.milestoneGrid}>
+              {MILESTONE_FIELDS.map((f) => (
+                <Field key={f.key} label={f.label} required={!!f.required}>
+                  <input
+                    type="date"
+                    style={s.inputWide}
+                    value={milestones[f.key] || ""}
+                    onChange={(e) =>
+                      setMilestones((p) => ({ ...p, [f.key]: e.target.value }))
                     }
-                  }}
-                  onUpdateDep={async (depId, type, lag) => {
-                    setError("");
-                    setLoading(true);
-                    try {
-                      await updateDependency(depId, type, lag);
-                      await recalcAndReload();
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setLoading(false);
-                    }
-                  }}
-                  onRemoveDep={async (depId) => {
-                    setError("");
-                    setLoading(true);
-                    try {
-                      await deleteDependency(depId);
-                      await recalcAndReload();
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setLoading(false);
-                    }
-                  }}
-                />
+                  />
+                </Field>
               ))}
 
-              {tasks.length === 0 && (
-                <tr>
-                  <td colSpan={10} style={{ padding: 14, color: "#475569" }}>
-                    No tasks found.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+              <Field label="Commissioning (as per internal schedule)" hint="Derived: Contract - 30 days">
+                <input type="date" style={s.inputWide} value={commInternal} readOnly />
+              </Field>
+            </div>
+          </div>
         </div>
 
-        <div style={{ marginTop: 12, color: "#475569", fontSize: 12 }}>
-          Note: ES/EF/LS/LF/Float/Critical are computed. Edit only Duration and existing Dependencies
-          (Type/Lag). No “Add Dependency” is provided.
+        <div style={s.modalFooter}>
+          <button style={s.btn} onClick={onClose} disabled={loading}>
+            Cancel
+          </button>
+          <button
+            style={{ ...s.btnPrimary, ...(loading || !canSubmit ? s.btnDisabled : {}) }}
+            disabled={loading || !canSubmit}
+            onClick={() => {
+              const payload = {
+                projectName: projectName.trim(),
+                templateName: templateName.trim() || "Solar EPC Master v1",
+                milestones: {
+                  ...milestones,
+                  // You can optionally send COMM_INTERNAL too (backend can ignore if it derives)
+                  COMM_INTERNAL: commInternal,
+                },
+              };
+              onCreate(payload);
+            }}
+          >
+            {loading ? (
+              <>
+                <Spinner size={14} /> Creating…
+              </>
+            ) : (
+              "Create Project"
+            )}
+          </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Field({ label, required, hint, children }) {
+  const s = makeStyles();
+  return (
+    <div style={s.field}>
+      <div style={s.fieldLabel}>
+        <span>{label}</span>
+        {required && <span style={s.req}>Required</span>}
+      </div>
+      {children}
+      {hint && <div style={s.fieldHint}>{hint}</div>}
+    </div>
+  );
+}
+
+function parseISODate(s) {
+  if (!s) return null;
+  const d = new Date(String(s) + "T00:00:00");
+  return isNaN(d.getTime()) ? null : d;
+}
+function toISODate(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** =========================
+ *  KPI Card
+ *  ========================= */
+function KpiCard({ label, value, hint }) {
+  const s = makeStyles();
+  return (
+    <div style={s.kpiCard}>
+      <div style={s.kpiValue}>{value}</div>
+      <div style={s.kpiLabel}>{label}</div>
+      {hint && <div style={s.kpiHint}>{hint}</div>}
+    </div>
+  );
+}
+
+function EmptyState({ text }) {
+  const s = makeStyles();
+  return (
+    <div style={{ padding: 14, color: "#475569", fontWeight: 800 }}>
+      {text}
+    </div>
+  );
+}
+
+/** =========================
+ *  Task Table
+ *  ========================= */
+function TaskTable({
+  tasks,
+  depsBySuccessor,
+  taskById,
+  loading,
+  getPredId,
+  getLag,
+  getType,
+  onSaveDuration,
+  onUpdateDep,
+  onRemoveDep,
+}) {
+  const s = makeStyles();
+  const normId = (v) => (v == null ? null : String(v));
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            {[
+              "Workstream",
+              "Task",
+              "Dur",
+              "ES",
+              "EF",
+              "LS",
+              "LF",
+              "Float",
+              "Critical",
+              "Dependencies (Edit Type + Lag)",
+            ].map((h) => (
+              <th key={h} style={s.th}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+
+        <tbody>
+          {(tasks || []).map((t, idx) => (
+            <TaskRow
+              key={normId(t.TaskId)}
+              rowIndex={idx}
+              task={t}
+              taskById={taskById}
+              depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
+              disabled={loading}
+              getPredId={getPredId}
+              getLag={getLag}
+              getType={getType}
+              onSaveDuration={onSaveDuration}
+              onUpdateDep={onUpdateDep}
+              onRemoveDep={onRemoveDep}
+            />
+          ))}
+
+          {!tasks?.length && (
+            <tr>
+              <td colSpan={10} style={{ padding: 14, color: "#475569" }}>
+                No tasks found.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
+      <div style={{ marginTop: 10, color: "#64748b", fontSize: 12, fontWeight: 800 }}>
+        Note: ES/EF/LS/LF/Float/Critical are computed. Edit only Duration and existing Dependencies (Type/Lag).
+      </div>
+    </div>
+  );
+}
+
+function TaskRow({
+  rowIndex,
+  task,
+  taskById,
+  depsForTask,
+  disabled,
+  getPredId,
+  getLag,
+  getType,
+  onSaveDuration,
+  onUpdateDep,
+  onRemoveDep,
+}) {
+  const s = makeStyles();
+  const isCrit = task.IsCritical === 1 || task.IsCritical === true;
+  const [dur, setDur] = useState(task.DurationDays ?? "");
+
+  useEffect(() => setDur(task.DurationDays ?? ""), [task.DurationDays]);
+
+  const rowBg = rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff";
+  const critBg = "#fff7ed";
+
+  return (
+    <tr style={{ background: isCrit ? critBg : rowBg }}>
+      <td style={s.td}>{task.Workstream ?? ""}</td>
+      <td style={{ ...s.td, fontWeight: 900 }}>{task.TaskName ?? ""}</td>
+
+      <td style={s.td}>
+        <input
+          style={s.tdInput}
+          value={dur}
+          onChange={(e) => setDur(e.target.value)}
+          disabled={disabled}
+        />
+        <button
+          style={{ ...s.smallBtnDark, ...(disabled ? s.btnDisabled : {}) }}
+          onClick={() => onSaveDuration(task.TaskId, dur === "" ? 0 : Number(dur))}
+          disabled={disabled}
+        >
+          Save
+        </button>
+      </td>
+
+      <td style={s.td}>{task.ES ?? ""}</td>
+      <td style={s.td}>{task.EF ?? ""}</td>
+      <td style={s.td}>{task.LS ?? ""}</td>
+      <td style={s.td}>{task.LF ?? ""}</td>
+      <td style={s.td}>{task.TotalFloat ?? ""}</td>
+      <td style={{ ...s.td, fontWeight: 900, color: isCrit ? "#b45309" : "#0f172a" }}>
+        {isCrit ? "YES" : ""}
+      </td>
+
+      <td style={{ ...s.td, minWidth: 460 }}>
+        {depsForTask.length === 0 ? (
+          <span style={{ color: "#64748b" }}>(none)</span>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {depsForTask.map((d) => {
+              const depId = d.__id ?? null;
+              const predIdRaw = getPredId(d);
+              const pred = taskById.get(predIdRaw == null ? null : String(predIdRaw));
+              const predName = pred ? `${pred.Workstream} - ${pred.TaskName}` : String(predIdRaw ?? "");
+
+              return (
+                <DepEditor
+                  key={String(depId ?? `${predIdRaw}_${Math.random()}`)}
+                  depId={depId}
+                  predName={predName}
+                  initialType={getType(d)}
+                  initialLag={getLag(d)}
+                  disabled={disabled}
+                  onUpdate={onUpdateDep}
+                  onRemove={onRemoveDep}
+                />
+              );
+            })}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdate, onRemove }) {
+  const s = makeStyles();
+  const [type, setType] = useState((initialType || "FS").toUpperCase());
+  const [lag, setLag] = useState(String(initialLag ?? 0));
+
+  useEffect(() => setType((initialType || "FS").toUpperCase()), [initialType]);
+  useEffect(() => setLag(String(initialLag ?? 0)), [initialLag]);
+
+  const canEdit = Number.isFinite(Number(depId));
+
+  return (
+    <div style={s.depRow}>
+      <div style={s.depName}>{predName}</div>
+
+      <select
+        value={type}
+        onChange={(e) => setType(e.target.value)}
+        disabled={disabled || !canEdit}
+        style={s.select}
+      >
+        <option value="FS">FS</option>
+        <option value="SS">SS</option>
+        <option value="FF">FF</option>
+        <option value="SF">SF</option>
+      </select>
+
+      <input
+        style={s.lagInput}
+        value={lag}
+        onChange={(e) => setLag(e.target.value)}
+        disabled={disabled || !canEdit}
+        placeholder="lag"
+      />
+
+      <button
+        style={{ ...s.smallBtnDark, ...(disabled || !canEdit ? s.btnDisabled : {}) }}
+        onClick={() => onUpdate(depId, type, lag === "" ? 0 : Number(lag))}
+        disabled={disabled || !canEdit}
+      >
+        Update
+      </button>
+
+      <button
+        style={{ ...s.smallBtnDanger, ...(disabled || !canEdit ? s.btnDisabled : {}) }}
+        onClick={() => onRemove(depId)}
+        disabled={disabled || !canEdit}
+      >
+        Remove
+      </button>
+
+      {!canEdit && (
+        <span style={s.depWarn}>Missing TaskDependencyId in getDependencies API</span>
+      )}
     </div>
   );
 }
@@ -638,218 +1130,9 @@ function Spinner({ size = 18 }) {
 }
 
 /** =========================
- *  Task Table Row
+ *  Gantt (Linked) — Adaptive ticks
  *  ========================= */
-function TaskRow({
-  rowIndex,
-  task,
-  taskById,
-  depsForTask,
-  disabled,
-  getDepId,
-  getPredId,
-  getLag,
-  getType,
-  onSaveDuration,
-  onUpdateDep,
-  onRemoveDep,
-}) {
-  const isCrit = task.IsCritical === 1 || task.IsCritical === true;
-  const [dur, setDur] = useState(task.DurationDays ?? "");
-
-  useEffect(() => setDur(task.DurationDays ?? ""), [task.DurationDays]);
-
-  const rowBg = rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff";
-  const critBg = "#fff7ed";
-
-  return (
-    <tr style={{ background: isCrit ? critBg : rowBg }}>
-      <td style={cell()}>{task.Workstream ?? ""}</td>
-      <td style={cell({ fontWeight: 900 })}>{task.TaskName ?? ""}</td>
-
-      <td style={cell()}>
-        <input
-          style={{
-            width: 70,
-            padding: "6px 8px",
-            borderRadius: 10,
-            border: "1px solid #cbd5e1",
-            outline: "none",
-          }}
-          value={dur}
-          onChange={(e) => setDur(e.target.value)}
-          disabled={disabled}
-        />
-        <button
-          style={{
-            marginLeft: 8,
-            padding: "6px 10px",
-            borderRadius: 10,
-            border: "1px solid #0f172a",
-            background: "#0f172a",
-            color: "#fff",
-            fontWeight: 900,
-            cursor: disabled ? "not-allowed" : "pointer",
-            opacity: disabled ? 0.55 : 1,
-          }}
-          onClick={() => onSaveDuration(dur === "" ? 0 : Number(dur))}
-          disabled={disabled}
-        >
-          Save
-        </button>
-      </td>
-
-      <td style={cell()}>{task.ES ?? ""}</td>
-      <td style={cell()}>{task.EF ?? ""}</td>
-      <td style={cell()}>{task.LS ?? ""}</td>
-      <td style={cell()}>{task.LF ?? ""}</td>
-      <td style={cell()}>{task.TotalFloat ?? ""}</td>
-      <td style={cell({ fontWeight: 900, color: isCrit ? "#b45309" : "#0f172a" })}>
-        {isCrit ? "YES" : ""}
-      </td>
-
-      <td style={cell({ minWidth: 420 })}>
-        {depsForTask.length === 0 ? (
-          <span style={{ color: "#64748b" }}>(none)</span>
-        ) : (
-          <ul style={{ margin: 0, paddingLeft: 18 }}>
-            {depsForTask.map((d) => {
-              const depIdRaw = getDepId(d);
-              const depId = Number(depIdRaw);
-              const predIdRaw = getPredId(d);
-              const pred = taskById.get(predIdRaw == null ? null : String(predIdRaw));
-              const predName = pred
-                ? `${pred.Workstream} - ${pred.TaskName}`
-                : String(predIdRaw ?? "");
-
-              return (
-                <DepEditor
-                  key={String(Number.isFinite(depId) ? depId : `${predIdRaw}_${Math.random()}`)}
-                  depId={Number.isFinite(depId) ? depId : null}
-                  predName={predName}
-                  initialType={getType(d)}
-                  initialLag={getLag(d)}
-                  disabled={disabled}
-                  onUpdate={onUpdateDep}
-                  onRemove={onRemoveDep}
-                />
-              );
-            })}
-          </ul>
-        )}
-      </td>
-    </tr>
-  );
-}
-
-function cell(extra = {}) {
-  return {
-    padding: "10px 10px",
-    borderBottom: "1px solid #eef2f7",
-    verticalAlign: "top",
-    color: "#0f172a",
-    ...extra,
-  };
-}
-
-function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdate, onRemove }) {
-  const [type, setType] = useState((initialType || "FS").toUpperCase());
-  const [lag, setLag] = useState(String(initialLag ?? 0));
-
-  useEffect(() => setType((initialType || "FS").toUpperCase()), [initialType]);
-  useEffect(() => setLag(String(initialLag ?? 0)), [initialLag]);
-
-  const canEdit = Number.isFinite(Number(depId));
-
-  const selectStyle = {
-    padding: "6px 8px",
-    borderRadius: 10,
-    border: "1px solid #cbd5e1",
-    background: "#fff",
-    outline: "none",
-  };
-
-  const inputStyle = {
-    width: 70,
-    marginLeft: 8,
-    padding: "6px 8px",
-    borderRadius: 10,
-    border: "1px solid #cbd5e1",
-    outline: "none",
-  };
-
-  const btnMini = {
-    marginLeft: 8,
-    padding: "6px 10px",
-    borderRadius: 10,
-    border: "1px solid #cbd5e1",
-    background: "#ffffff",
-    color: "#0f172a",
-    fontWeight: 900,
-    cursor: disabled || !canEdit ? "not-allowed" : "pointer",
-    opacity: disabled || !canEdit ? 0.55 : 1,
-  };
-
-  const btnDanger = {
-    ...btnMini,
-    background: "#fef2f2",
-    border: "1px solid #fecaca",
-    color: "#991b1b",
-  };
-
-  return (
-    <li style={{ marginBottom: 8 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-        <span style={{ display: "inline-block", minWidth: 260, fontWeight: 800, color: "#0f172a" }}>
-          {predName}
-        </span>
-
-        <select
-          value={type}
-          onChange={(e) => setType(e.target.value)}
-          disabled={disabled || !canEdit}
-          style={selectStyle}
-        >
-          <option value="FS">FS</option>
-          <option value="SS">SS</option>
-          <option value="FF">FF</option>
-          <option value="SF">SF</option>
-        </select>
-
-        <input
-          style={inputStyle}
-          value={lag}
-          onChange={(e) => setLag(e.target.value)}
-          disabled={disabled || !canEdit}
-          placeholder="lag"
-        />
-
-        <button
-          style={{ ...btnMini, background: "#0f172a", color: "#fff", border: "1px solid #0f172a" }}
-          onClick={() => onUpdate(depId, type, lag === "" ? 0 : Number(lag))}
-          disabled={disabled || !canEdit}
-        >
-          Update
-        </button>
-
-        <button style={btnDanger} onClick={() => onRemove(depId)} disabled={disabled || !canEdit}>
-          Remove
-        </button>
-
-        {!canEdit && (
-          <span style={{ marginLeft: 6, color: "#b91c1c", fontSize: 12, fontWeight: 900 }}>
-            Missing TaskDependencyId in getDependencies API
-          </span>
-        )}
-      </div>
-    </li>
-  );
-}
-
-/** =========================
- *  Gantt (Linked) — Adaptive X-axis ticks
- *  ========================= */
-function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
+function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId, compact = false }) {
   const normId = (v) => (v == null ? null : String(v));
 
   const valid = (tasks || [])
@@ -862,12 +1145,12 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
 
   if (!valid.length) return null;
 
-  const PX_PER_DAY = 10;
-  const LEFT_COL_W = 400;
-  const ROW_H = 30;
-  const BAR_H = 14;
+  const PX_PER_DAY = compact ? 6 : 10;
+  const LEFT_COL_W = compact ? 320 : 420;
+  const ROW_H = compact ? 26 : 30;
+  const BAR_H = compact ? 10 : 14;
   const BAR_TOP_OFFSET = (ROW_H - BAR_H) / 2;
-  const HEADER_H = 28;
+  const HEADER_H = compact ? 22 : 28;
 
   const minStart = Math.min(...valid.map((t) => t.ES));
   const maxFinish = Math.max(...valid.map((t) => t.EF));
@@ -876,7 +1159,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
 
   // Adaptive tick step to avoid clutter
   const pickTickStep = (pxPerDay) => {
-    const minLabelPx = 80; // increase -> fewer labels
+    const minLabelPx = compact ? 90 : 80;
     const raw = Math.ceil(minLabelPx / Math.max(1, pxPerDay));
     const nice = [1, 2, 3, 5, 7, 10, 14, 21, 28, 30];
     return nice.find((s) => s >= raw) || raw;
@@ -907,18 +1190,17 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
   const canvasH = HEADER_H + valid.length * ROW_H;
   const canvasW = LEFT_COL_W + timelineW;
 
-  return (
-    <div style={{ marginTop: 22 }}>
-      <div style={{ fontWeight: 900, marginBottom: 10 }}>Gantt (Linked) — Links: {links.length}</div>
+  const shell = makeStyles();
 
+  return (
+    <div style={{ padding: compact ? 0 : 12 }}>
       <div
         style={{
           overflowX: "auto",
-          border: "1px solid #e2e8f0",
+          border: compact ? "none" : "1px solid #e2e8f0",
           background: "#ffffff",
-          borderRadius: 12,
-          padding: 12,
-          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+          borderRadius: compact ? 0 : 12,
+          padding: compact ? 0 : 12,
         }}
       >
         <div style={{ position: "relative", width: canvasW, height: canvasH }}>
@@ -1000,7 +1282,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                   d={d}
                   fill="none"
                   stroke="#111"
-                  strokeWidth="1.8"
+                  strokeWidth={compact ? "1.3" : "1.8"}
                   markerEnd="url(#arrowGantt)"
                   opacity="0.85"
                 />
@@ -1042,7 +1324,6 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                       overflow: "hidden",
                     }}
                   >
-                    {/* Minor grid (unlabeled) */}
                     {Array.from({ length: totalDays + 1 }).map((_, i) => (
                       <div
                         key={i}
@@ -1076,17 +1357,19 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
             })}
           </div>
         </div>
-      </div>
 
-      <div style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
-        Lines are drawn predecessor → successor for visibility. Actual scheduling behavior depends on backend LinkType/LagDays.
+        {!compact && (
+          <div style={shell.note}>
+            Lines are drawn predecessor → successor for visibility. Scheduling semantics depend on backend LinkType/LagDays.
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 /** =========================
- *  Network Diagram
+ *  Network Diagram (Dagre)
  *  ========================= */
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
@@ -1161,27 +1444,15 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
   }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!nodes.length) return null;
+  const s = makeStyles();
 
   return (
-    <div
-      style={{
-        marginTop: 16,
-        border: "1px solid #e2e8f0",
-        padding: 12,
-        borderRadius: 12,
-        background: "#ffffff",
-        boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-      }}
-    >
-      <div style={{ fontWeight: 900, margin: "0 0 10px 0" }}>
-        Network Diagram (Critical Path Highlight)
+    <div style={{ padding: 12 }}>
+      <div style={s.note}>
+        Nodes with orange border are tasks where IsCritical=true. Edges are labelled with LinkType + Lag.
       </div>
 
-      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
-        Nodes with orange border are tasks where IsCritical=true.
-      </div>
-
-      <div style={{ overflow: "auto" }}>
+      <div style={{ overflow: "auto", border: "1px solid #e2e8f0", borderRadius: 12 }}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
           <defs>
             <marker id="arrowNet" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
@@ -1219,19 +1490,19 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
                   y={y}
                   width={n.w}
                   height={n.h}
-                  rx="8"
-                  ry="8"
+                  rx="10"
+                  ry="10"
                   fill={isCrit ? "#fff7ed" : "#f8fafc"}
                   stroke={isCrit ? "#f59e0b" : "#94a3b8"}
                   strokeWidth={isCrit ? "3" : "2"}
                 />
-                <text x={x + 10} y={y + 20} fontSize="12" fontWeight="700" fill="#111">
+                <text x={x + 10} y={y + 22} fontSize="12" fontWeight="700" fill="#111">
                   #{n.task.TaskId} {n.task.TaskName}
                 </text>
-                <text x={x + 10} y={y + 40} fontSize="11" fill="#333">
+                <text x={x + 10} y={y + 42} fontSize="11" fill="#333">
                   {n.task.Workstream} | ES {n.task.ES ?? ""} EF {n.task.EF ?? ""}
                 </text>
-                <text x={x + 10} y={y + 56} fontSize="11" fill="#444">
+                <text x={x + 10} y={y + 58} fontSize="11" fill="#444">
                   Float: {n.task.TotalFloat ?? ""}
                 </text>
               </g>
@@ -1241,4 +1512,355 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
       </div>
     </div>
   );
+}
+
+/** =========================
+ *  Styles factory
+ *  ========================= */
+function makeStyles() {
+  const pageBg = "#f6f8fb";
+  const cardBg = "#ffffff";
+  const border = "#e5eaf0";
+  const text = "#0f172a";
+  const sub = "#64748b";
+  const dark = "#0f172a";
+
+  return {
+    page: {
+      minHeight: "100vh",
+      background: pageBg,
+      color: text,
+      fontFamily:
+        'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif',
+    },
+
+    topbar: {
+      position: "sticky",
+      top: 0,
+      zIndex: 50,
+      background: cardBg,
+      borderBottom: `1px solid ${border}`,
+      padding: "12px 18px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+    },
+
+    brandWrap: { display: "flex", alignItems: "center", gap: 10 },
+    brandDot: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      background: "linear-gradient(135deg, #0f172a, #1f2937)",
+    },
+    brandTitle: { fontWeight: 950, letterSpacing: 0.2 },
+    brandSub: { fontSize: 12, color: sub, fontWeight: 800 },
+
+    tabs: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+    tabBtn: {
+      border: `1px solid ${border}`,
+      background: "#fff",
+      color: text,
+      padding: "8px 10px",
+      borderRadius: 10,
+      fontWeight: 900,
+      cursor: "pointer",
+    },
+    tabBtnActive: {
+      border: "1px solid #0ea5a4",
+      boxShadow: "0 0 0 3px rgba(14,165,164,0.10)",
+    },
+
+    topActions: { display: "flex", alignItems: "center", gap: 10 },
+
+    content: { maxWidth: 1600, margin: "0 auto", padding: "16px 18px 28px" },
+
+    projectBar: {
+      background: cardBg,
+      border: `1px solid ${border}`,
+      borderRadius: 14,
+      padding: 14,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+    },
+    projectLeft: { display: "flex", flexDirection: "column", gap: 4 },
+    projectName: { fontWeight: 950, fontSize: 18 },
+    projectMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900 },
+
+    projectRight: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+    inlineLabel: { display: "flex", alignItems: "center", gap: 8, fontWeight: 900, color: "#334155" },
+    input: {
+      width: 90,
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      outline: "none",
+      background: "#fff",
+    },
+
+    btn: {
+      padding: "8px 12px",
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      background: "#ffffff",
+      color: text,
+      fontWeight: 900,
+      cursor: "pointer",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 8,
+    },
+    btnDark: {
+      padding: "8px 12px",
+      borderRadius: 10,
+      border: `1px solid ${dark}`,
+      background: dark,
+      color: "#fff",
+      fontWeight: 950,
+      cursor: "pointer",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 8,
+    },
+    btnPrimary: {
+      padding: "10px 14px",
+      borderRadius: 12,
+      border: "1px solid #0ea5a4",
+      background: "#0ea5a4",
+      color: "#ffffff",
+      fontWeight: 950,
+      cursor: "pointer",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 8,
+    },
+    btnDisabled: { opacity: 0.55, cursor: "not-allowed" },
+
+    error: {
+      marginTop: 12,
+      background: "#fef2f2",
+      border: "1px solid #fecaca",
+      color: "#991b1b",
+      padding: "10px 12px",
+      borderRadius: 12,
+      fontWeight: 900,
+    },
+
+    card: {
+      marginTop: 14,
+      background: cardBg,
+      border: `1px solid ${border}`,
+      borderRadius: 14,
+      boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+      overflow: "hidden",
+    },
+    cardHeader: {
+      padding: 14,
+      borderBottom: `1px solid ${border}`,
+      display: "flex",
+      alignItems: "baseline",
+      justifyContent: "space-between",
+      gap: 10,
+      flexWrap: "wrap",
+    },
+    cardTitle: { fontWeight: 950, fontSize: 16 },
+    cardSub: { fontSize: 12, color: sub, fontWeight: 800 },
+
+    kpiGrid: {
+      padding: 14,
+      display: "grid",
+      gridTemplateColumns: "repeat(4, minmax(180px, 1fr))",
+      gap: 12,
+    },
+    kpiCard: {
+      background: "#f8fafc",
+      border: `1px solid ${border}`,
+      borderRadius: 14,
+      padding: 14,
+      textAlign: "center",
+    },
+    kpiValue: { fontWeight: 950, fontSize: 28, color: "#0ea5a4" },
+    kpiLabel: { marginTop: 6, fontWeight: 900, color: "#334155" },
+    kpiHint: { marginTop: 4, fontSize: 12, color: sub, fontWeight: 800 },
+
+    sectionTitle: { fontWeight: 950, marginBottom: 6 },
+    sectionSub: { fontSize: 12, color: sub, fontWeight: 800 },
+
+    listRow: { padding: "10px 0", borderBottom: `1px solid ${border}` },
+    listMeta: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 2 },
+    muted: { color: sub, fontWeight: 800 },
+
+    riskRow: {
+      padding: "10px 12px",
+      border: `1px solid ${border}`,
+      borderRadius: 12,
+      marginBottom: 10,
+      background: "#fff",
+    },
+
+    table: {
+      width: "100%",
+      borderCollapse: "separate",
+      borderSpacing: 0,
+      fontSize: 13,
+    },
+    th: {
+      textAlign: "left",
+      padding: "10px 10px",
+      background: "#f1f5f9",
+      borderBottom: `1px solid ${border}`,
+      fontWeight: 950,
+      color: text,
+      whiteSpace: "nowrap",
+    },
+    td: {
+      padding: "10px 10px",
+      borderBottom: "1px solid #eef2f7",
+      verticalAlign: "top",
+      color: text,
+    },
+    tdInput: {
+      width: 70,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      outline: "none",
+    },
+    smallBtnDark: {
+      marginLeft: 8,
+      padding: "6px 10px",
+      borderRadius: 10,
+      border: `1px solid ${dark}`,
+      background: dark,
+      color: "#fff",
+      fontWeight: 950,
+      cursor: "pointer",
+    },
+    smallBtnDanger: {
+      marginLeft: 8,
+      padding: "6px 10px",
+      borderRadius: 10,
+      border: "1px solid #fecaca",
+      background: "#fef2f2",
+      color: "#991b1b",
+      fontWeight: 950,
+      cursor: "pointer",
+    },
+    depRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
+    depName: { minWidth: 250, fontWeight: 900 },
+    select: {
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      background: "#fff",
+      outline: "none",
+    },
+    lagInput: {
+      width: 70,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: `1px solid ${border}`,
+      outline: "none",
+    },
+    depWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
+
+    note: { marginTop: 10, fontSize: 12, color: sub, fontWeight: 800 },
+
+    overlay: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(15, 23, 42, 0.25)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 9999,
+    },
+    overlayCard: {
+      background: "#ffffff",
+      border: `1px solid ${border}`,
+      borderRadius: 12,
+      padding: "16px 18px",
+      minWidth: 360,
+      boxShadow: "0 10px 25px rgba(0,0,0,0.12)",
+      display: "flex",
+      gap: 12,
+      alignItems: "center",
+    },
+    overlayTitle: { fontWeight: 950, color: text },
+    overlaySub: { fontSize: 12, color: sub, fontWeight: 800 },
+
+    modalOverlay: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(15,23,42,0.35)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 10000,
+      padding: 16,
+    },
+    modal: {
+      width: "min(980px, 100%)",
+      background: "#fff",
+      borderRadius: 16,
+      border: `1px solid ${border}`,
+      boxShadow: "0 25px 70px rgba(0,0,0,0.30)",
+      overflow: "hidden",
+    },
+    modalHeader: {
+      padding: 14,
+      borderBottom: `1px solid ${border}`,
+      display: "flex",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      gap: 12,
+    },
+    modalTitle: { fontWeight: 950, fontSize: 16 },
+    modalSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
+    iconBtn: {
+      border: `1px solid ${border}`,
+      background: "#fff",
+      borderRadius: 10,
+      width: 36,
+      height: 36,
+      cursor: "pointer",
+      fontWeight: 950,
+    },
+    modalBody: { padding: 14 },
+    modalFooter: {
+      padding: 14,
+      borderTop: `1px solid ${border}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      gap: 10,
+    },
+    formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
+    milestoneGrid: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 },
+
+    field: { display: "flex", flexDirection: "column", gap: 6 },
+    fieldLabel: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontWeight: 950, fontSize: 12 },
+    fieldHint: { fontSize: 12, color: sub, fontWeight: 800 },
+    req: {
+      fontSize: 11,
+      padding: "2px 8px",
+      borderRadius: 999,
+      background: "#fff7ed",
+      border: "1px solid #fed7aa",
+      color: "#b45309",
+      fontWeight: 950,
+    },
+    inputWide: {
+      width: "100%",
+      padding: "10px 10px",
+      borderRadius: 12,
+      border: `1px solid ${border}`,
+      outline: "none",
+      background: "#fff",
+    },
+  };
 }
