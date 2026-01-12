@@ -2,6 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
 
+/**
+ * MSP Lite UI — App.jsx (corrected)
+ * Fixes:
+ * 1) /getSchedule response shape: { ok:true, project:{ tasks:[], version:{} } }
+ *    -> schedule state must be set to sch.json.project (or tolerant equivalent)
+ * 2) ID normalization: tasks/deps sometimes return IDs as strings; normalize to String() for Map keys
+ * 3) deps payload tolerance: dependencies can be under different keys
+ */
+
 export default function App() {
   const [projectId, setProjectId] = useState("1");
   const [loading, setLoading] = useState(false);
@@ -14,8 +23,15 @@ export default function App() {
   const [showNetwork, setShowNetwork] = useState(false);
   const [showGantt, setShowGantt] = useState(true);
 
-  const tasks = schedule?.tasks || [];
-  const version = schedule?.version || null;
+  // Normalize IDs as strings for consistent Map lookups
+  const normId = (v) => (v == null ? null : String(v));
+
+  // In production, schedule is usually sch.json.project
+  // Still tolerate other shapes just in case.
+  const scheduleObj = schedule?.project ?? schedule;
+
+  const tasks = scheduleObj?.tasks || [];
+  const version = scheduleObj?.version || null;
 
   const criticalCount = useMemo(() => {
     return tasks.filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
@@ -23,9 +39,9 @@ export default function App() {
 
   const taskById = useMemo(() => {
     const m = new Map();
-    for (const t of tasks) m.set(t.TaskId, t);
+    for (const t of tasks) m.set(normId(t.TaskId), t);
     return m;
-  }, [tasks]);
+  }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** =========================
    *  Dependency field tolerance
@@ -86,7 +102,7 @@ export default function App() {
   const depsBySuccessor = useMemo(() => {
     const m = new Map();
     (deps || []).forEach((d) => {
-      const succ = getSuccId(d);
+      const succ = normId(getSuccId(d));
       if (succ == null) return;
 
       const arr = m.get(succ) || [];
@@ -143,13 +159,30 @@ export default function App() {
         ),
       ]);
 
-      if (!sch.res.ok || !sch.json?.ok)
+      if (!sch.res.ok || !sch.json?.ok) {
         throw new Error(sch.json?.error || "Failed to load schedule");
-      if (!dep.res.ok || !dep.json?.ok)
+      }
+      if (!dep.res.ok || !dep.json?.ok) {
         throw new Error(dep.json?.error || "Failed to load dependencies");
+      }
 
-      setSchedule(sch.json);
-      setDeps(dep.json.dependencies || dep.json.deps || []);
+      // ✅ Schedule payload tolerance:
+      // Most common: sch.json.project (your API)
+      const schedulePayload =
+        sch.json?.project ?? sch.json?.schedule ?? sch.json?.data ?? sch.json;
+
+      setSchedule(schedulePayload);
+
+      // ✅ Deps payload tolerance:
+      const depsPayload =
+        dep.json?.dependencies ??
+        dep.json?.deps ??
+        dep.json?.project?.dependencies ??
+        dep.json?.project?.deps ??
+        dep.json?.data ??
+        [];
+
+      setDeps(Array.isArray(depsPayload) ? depsPayload : []);
     } catch (e) {
       setError(e.message || String(e));
       setSchedule(null);
@@ -190,8 +223,6 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Duration update failed");
   }
 
-  // REQUIRED on backend: POST /updateDependency
-  // This sends both casings for tolerance: linkType + LinkType, lagDays + LagDays
   async function updateDependency(taskDependencyId, linkType, lagDays) {
     const idNum = Number(taskDependencyId);
     if (!Number.isFinite(idNum)) {
@@ -334,10 +365,10 @@ export default function App() {
         <tbody>
           {tasks.map((t) => (
             <TaskRow
-              key={t.TaskId}
+              key={normId(t.TaskId)}
               task={t}
               taskById={taskById}
-              depsForTask={depsBySuccessor.get(t.TaskId) || []}
+              depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
               disabled={loading}
               getDepId={getDepId}
               getPredId={getPredId}
@@ -348,7 +379,7 @@ export default function App() {
                 setLoading(true);
                 try {
                   await updateDuration(t.TaskId, newDur);
-                  await recalcAndReload(); // ✅ single clean flow
+                  await recalcAndReload();
                 } catch (e) {
                   setError(e.message || String(e));
                 } finally {
@@ -360,7 +391,7 @@ export default function App() {
                 setLoading(true);
                 try {
                   await updateDependency(depId, type, lag);
-                  await recalcAndReload(); // ✅ single clean flow
+                  await recalcAndReload();
                 } catch (e) {
                   setError(e.message || String(e));
                 } finally {
@@ -372,7 +403,7 @@ export default function App() {
                 setLoading(true);
                 try {
                   await deleteDependency(depId);
-                  await recalcAndReload(); // ✅ single clean flow
+                  await recalcAndReload();
                 } catch (e) {
                   setError(e.message || String(e));
                 } finally {
@@ -423,8 +454,8 @@ function TaskRow({
 
   return (
     <tr style={{ background: isCrit ? "#ffeeba" : "white" }}>
-      <td>{task.Workstream}</td>
-      <td>{task.TaskName}</td>
+      <td>{task.Workstream ?? ""}</td>
+      <td>{task.TaskName ?? ""}</td>
 
       <td>
         <input
@@ -455,16 +486,16 @@ function TaskRow({
         ) : (
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {depsForTask.map((d) => {
-              const depId = d.__id ?? getDepId(d); // should be numeric or null
-              const predId = getPredId(d);
-              const pred = taskById.get(predId);
+              const depId = d.__id ?? getDepId(d); // numeric or null
+              const predIdRaw = getPredId(d);
+              const pred = taskById.get(predIdRaw == null ? null : String(predIdRaw));
               const predName = pred
                 ? `${pred.Workstream} - ${pred.TaskName}`
-                : String(predId);
+                : String(predIdRaw ?? "");
 
               return (
                 <DepEditor
-                  key={String(depId ?? Math.random())}
+                  key={String(depId ?? `${predIdRaw}_${Math.random()}`)}
                   depId={depId}
                   predName={predName}
                   initialType={getType(d)}
@@ -551,6 +582,8 @@ function DepEditor({
  *  Gantt (Linked)
  *  ========================= */
 function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
+  const normId = (v) => (v == null ? null : String(v));
+
   const valid = (tasks || [])
     .map((t) => ({
       ...t,
@@ -574,21 +607,21 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
   const timelineW = totalDays * PX_PER_DAY;
 
   const rowIndexByTaskId = new Map();
-  valid.forEach((t, idx) => rowIndexByTaskId.set(t.TaskId, idx));
-  const taskById = new Map(valid.map((t) => [t.TaskId, t]));
+  valid.forEach((t, idx) => rowIndexByTaskId.set(normId(t.TaskId), idx));
+  const taskById = new Map(valid.map((t) => [normId(t.TaskId), t]));
 
   const barXStart = (task) => LEFT_COL_W + (task.ES - minStart) * PX_PER_DAY;
   const barXEnd = (task) => LEFT_COL_W + (task.EF - minStart) * PX_PER_DAY;
   const barMidY = (task) => {
-    const idx = rowIndexByTaskId.get(task.TaskId) ?? 0;
+    const idx = rowIndexByTaskId.get(normId(task.TaskId)) ?? 0;
     return HEADER_H + idx * ROW_H + BAR_TOP_OFFSET + BAR_H / 2;
   };
 
   const links = (deps || [])
     .map((d) => ({
       id: getDepId(d) ?? `skip_${Math.random()}`,
-      predId: getPredId(d),
-      succId: getSuccId(d),
+      predId: normId(getPredId(d)),
+      succId: normId(getSuccId(d)),
     }))
     .filter((l) => l.predId != null && l.succId != null)
     .filter((l) => taskById.has(l.predId) && taskById.has(l.succId))
@@ -616,7 +649,15 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
             Task
           </div>
 
-          <div style={{ position: "absolute", left: LEFT_COL_W, top: 0, height: HEADER_H, width: timelineW }}>
+          <div
+            style={{
+              position: "absolute",
+              left: LEFT_COL_W,
+              top: 0,
+              height: HEADER_H,
+              width: timelineW,
+            }}
+          >
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
               if (i % 5 !== 0) return null;
               const day = minStart + i;
@@ -686,7 +727,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
 
               return (
                 <div
-                  key={t.TaskId}
+                  key={normId(t.TaskId)}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -740,6 +781,8 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
  *  Network Diagram
  *  ========================= */
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
+  const normId = (v) => (v == null ? null : String(v));
+
   const { nodes, edges, w, h } = useMemo(() => {
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: "LR", nodesep: 30, ranksep: 70, marginx: 20, marginy: 20 });
@@ -748,31 +791,31 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    const taskMap = new Map((tasks || []).map((t) => [t.TaskId, t]));
+    const taskMap = new Map((tasks || []).map((t) => [normId(t.TaskId), t]));
 
     for (const t of tasks || []) {
-      g.setNode(String(t.TaskId), { width: NODE_W, height: NODE_H });
+      g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
     }
 
     const edgeList = [];
     (deps || []).forEach((d) => {
-      const pred = getPredId(d);
-      const succ = getSuccId(d);
+      const pred = normId(getPredId(d));
+      const succ = normId(getSuccId(d));
       if (pred == null || succ == null) return;
       if (!taskMap.has(pred) || !taskMap.has(succ)) return;
 
       const depId = getDepId(d);
       if (!Number.isFinite(Number(depId))) return;
 
-      g.setEdge(String(pred), String(succ), { id: String(depId) });
+      g.setEdge(pred, succ, { id: String(depId) });
 
       const type = String(getType(d) || "FS").toUpperCase();
       const lag = Number(getLag(d) || 0);
 
       edgeList.push({
         id: String(depId),
-        from: String(pred),
-        to: String(succ),
+        from: pred,
+        to: succ,
         label: `${type}${lag !== 0 ? `+${lag}` : ""}`,
       });
     });
@@ -780,21 +823,34 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     dagre.layout(g);
 
     const nodeList = (tasks || []).map((t) => {
-      const n = g.node(String(t.TaskId));
-      return { id: String(t.TaskId), task: t, x: n.x, y: n.y, w: NODE_W, h: NODE_H };
+      const n = g.node(normId(t.TaskId));
+      return {
+        id: normId(t.TaskId),
+        task: t,
+        x: n?.x ?? 0,
+        y: n?.y ?? 0,
+        w: NODE_W,
+        h: NODE_H,
+      };
     });
 
     const edgeGeom = edgeList.map((e) => {
       const from = g.node(e.from);
       const to = g.node(e.to);
-      return { ...e, x1: from.x + NODE_W / 2, y1: from.y, x2: to.x - NODE_W / 2, y2: to.y };
+      return {
+        ...e,
+        x1: (from?.x ?? 0) + NODE_W / 2,
+        y1: from?.y ?? 0,
+        x2: (to?.x ?? 0) - NODE_W / 2,
+        y2: to?.y ?? 0,
+      };
     });
 
     const gw = (g.graph().width || 1200) + 80;
     const gh = (g.graph().height || 600) + 80;
 
     return { nodes: nodeList, edges: edgeGeom, w: gw, h: gh };
-  }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]);
+  }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!nodes.length) return null;
 
@@ -826,7 +882,12 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
                 markerEnd="url(#arrowNet)"
                 opacity="0.85"
               />
-              <text x={(e.x1 + e.x2) / 2} y={(e.y1 + e.y2) / 2 - 6} fontSize="11" fill="#444">
+              <text
+                x={(e.x1 + e.x2) / 2}
+                y={(e.y1 + e.y2) / 2 - 6}
+                fontSize="11"
+                fill="#444"
+              >
                 {e.label}
               </text>
             </g>
