@@ -1,1 +1,1 @@
-export const API_BASE = "http://localhost:7071/api";
+export const API_BASE = "https://icy-glacier-0ee6eca00.6.azurestaticapps.net";
