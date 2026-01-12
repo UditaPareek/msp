@@ -3,17 +3,20 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite UI — App.jsx (corrected)
- * Fixes:
- * 1) /getSchedule response shape: { ok:true, project:{ tasks:[], version:{} } }
- *    -> schedule state must be set to sch.json.project (or tolerant equivalent)
- * 2) ID normalization: tasks/deps sometimes return IDs as strings; normalize to String() for Map keys
- * 3) deps payload tolerance: dependencies can be under different keys
+ * MSP Lite UI — App.jsx (updated)
+ * Adds:
+ * 1) Recalculate loading overlay + spinner
+ * 2) More formal UI styling (cards, buttons, table polish)
+ * Keeps:
+ * - Response-shape tolerance
+ * - ID normalization
+ * - Dependency-field tolerance
  */
 
 export default function App() {
   const [projectId, setProjectId] = useState("1");
   const [loading, setLoading] = useState(false);
+  const [isRecalculating, setIsRecalculating] = useState(false);
   const [error, setError] = useState("");
 
   const [schedule, setSchedule] = useState(null);
@@ -26,35 +29,28 @@ export default function App() {
   // Normalize IDs as strings for consistent Map lookups
   const normId = (v) => (v == null ? null : String(v));
 
-  // In production, schedule is usually sch.json.project
-  // Still tolerate other shapes just in case.
-  const scheduleObj = schedule?.project ?? schedule;
+  // Your API returns tasks + version at the ROOT (not inside project)
+  const tasks =
+    schedule?.tasks ??
+    schedule?.project?.tasks ?? // tolerance if backend changes later
+    schedule?.Tasks ??
+    schedule?.project?.Tasks ??
+    [];
 
- // Your API returns tasks + version at the ROOT (not inside project)
-const project = schedule?.project ?? null;
-
-const tasks =
-  schedule?.tasks ??
-  schedule?.project?.tasks ??   // tolerance if backend changes later
-  schedule?.Tasks ??
-  schedule?.project?.Tasks ??
-  [];
-
-const version =
-  schedule?.version ??
-  schedule?.project?.version ?? // tolerance
-  schedule?.Version ??
-  schedule?.project?.Version ??
-  null;
-
+  const version =
+    schedule?.version ??
+    schedule?.project?.version ?? // tolerance
+    schedule?.Version ??
+    schedule?.project?.Version ??
+    null;
 
   const criticalCount = useMemo(() => {
-    return tasks.filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
+    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
   }, [tasks]);
 
   const taskById = useMemo(() => {
     const m = new Map();
-    for (const t of tasks) m.set(normId(t.TaskId), t);
+    for (const t of tasks || []) m.set(normId(t.TaskId), t);
     return m;
   }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -169,9 +165,7 @@ const version =
             projectId
           )}&versionId=latest&t=${bust}`
         ),
-        fetchJson(
-          `${API_BASE}/getDependencies?projectId=${encodeURIComponent(projectId)}&t=${bust}`
-        ),
+        fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(projectId)}&t=${bust}`),
       ]);
 
       if (!sch.res.ok || !sch.json?.ok) {
@@ -182,7 +176,7 @@ const version =
       }
 
       // ✅ Schedule payload tolerance:
-      // Most common: sch.json.project (your API)
+      // Most common: sch.json = { ok:true, project:{...}, tasks:[...], version:{...} }
       setSchedule(sch.json);
 
       // ✅ Deps payload tolerance:
@@ -215,6 +209,7 @@ const version =
 
   async function recalcAndReload() {
     setError("");
+    setIsRecalculating(true);
     setLoading(true);
     try {
       await recalcOnly();
@@ -222,6 +217,7 @@ const version =
     } catch (e) {
       setError(e.message || String(e));
     } finally {
+      setIsRecalculating(false);
       setLoading(false);
     }
   }
@@ -249,10 +245,8 @@ const version =
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         taskDependencyId: idNum,
-
         linkType: type,
         LinkType: type,
-
         lagDays: lagNum,
         LagDays: lagNum,
       }),
@@ -280,33 +274,154 @@ const version =
   }, []);
 
   /** =========================
+   *  Styling helpers
+   *  ========================= */
+  const btn = {
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#ffffff",
+    color: "#0f172a",
+    fontWeight: 700,
+    cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+  };
+
+  const btnPrimary = {
+    ...btn,
+    background: "#0f172a",
+    color: "#ffffff",
+    border: "1px solid #0f172a",
+  };
+
+  const btnDisabled = {
+    opacity: 0.55,
+    cursor: "not-allowed",
+  };
+
+  const inputStyle = {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#ffffff",
+    outline: "none",
+  };
+
+  /** =========================
    *  UI
    *  ========================= */
   return (
-    <div style={{ padding: 24, fontFamily: "Arial", maxWidth: 1600 }}>
-      <h2>MSP Lite UI</h2>
+    <div
+      style={{
+        padding: 24,
+        fontFamily:
+          'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif',
+        maxWidth: 1600,
+        margin: "0 auto",
+        color: "#0f172a",
+        background: "#f8fafc",
+        minHeight: "100vh",
+      }}
+    >
+      <style>{`
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+      `}</style>
 
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <label>
-          Project ID:&nbsp;
+      {isRecalculating && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(15, 23, 42, 0.25)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+          }}
+        >
+          <div
+            style={{
+              background: "#ffffff",
+              border: "1px solid #e2e8f0",
+              borderRadius: 12,
+              padding: "16px 18px",
+              minWidth: 340,
+              boxShadow: "0 10px 25px rgba(0,0,0,0.12)",
+              display: "flex",
+              gap: 12,
+              alignItems: "center",
+            }}
+          >
+            <Spinner size={18} />
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <div style={{ fontWeight: 800, color: "#0f172a" }}>Recalculating schedule</div>
+              <div style={{ fontSize: 12, color: "#475569" }}>
+                Computing ES/EF/LS/LF, float, and critical path…
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 20, fontWeight: 900 }}>MSP Lite UI</div>
+        <div style={{ fontSize: 12, color: "#475569" }}>
+          Schedule viewer and editor for Duration and Dependency attributes
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          flexWrap: "wrap",
+          background: "#ffffff",
+          border: "1px solid #e2e8f0",
+          borderRadius: 12,
+          padding: 12,
+          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        }}
+      >
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontWeight: 700 }}>
+          Project ID
           <input
             value={projectId}
             onChange={(e) => setProjectId(e.target.value)}
-            style={{ width: 80 }}
+            style={{ ...inputStyle, width: 90 }}
           />
         </label>
 
-        <button onClick={loadAll} disabled={loading}>
-          Load
+        <button onClick={loadAll} disabled={loading} style={{ ...btn, ...(loading ? btnDisabled : {}) }}>
+          {loading && !isRecalculating ? (
+            <>
+              <Spinner size={14} /> Loading
+            </>
+          ) : (
+            "Load"
+          )}
         </button>
 
-        <button onClick={recalcAndReload} disabled={loading}>
-          Recalculate
+        <button
+          onClick={recalcAndReload}
+          disabled={loading}
+          style={{ ...btnPrimary, ...(loading ? btnDisabled : {}) }}
+        >
+          {isRecalculating ? (
+            <>
+              <Spinner size={14} /> Recalculating
+            </>
+          ) : (
+            "Recalculate"
+          )}
         </button>
 
         <button
           onClick={() => setShowNetwork((v) => !v)}
           disabled={loading || tasks.length === 0}
+          style={{ ...btn, ...((loading || tasks.length === 0) ? btnDisabled : {}) }}
         >
           {showNetwork ? "Hide Network Diagram" : "Show Network Diagram"}
         </button>
@@ -314,22 +429,37 @@ const version =
         <button
           onClick={() => setShowGantt((v) => !v)}
           disabled={loading || tasks.length === 0}
+          style={{ ...btn, ...((loading || tasks.length === 0) ? btnDisabled : {}) }}
         >
           {showGantt ? "Hide Gantt Chart" : "Show Gantt Chart"}
         </button>
 
         {version && (
-          <span>
-            Version {version.versionNo} | Finish Day {version.projectFinishDay} | Critical{" "}
-            {criticalCount}/{tasks.length}
-          </span>
+          <div style={{ marginLeft: "auto", fontSize: 12, color: "#334155", fontWeight: 700 }}>
+            Version {version.versionNo} &nbsp;|&nbsp; Finish Day {version.projectFinishDay} &nbsp;|&nbsp;
+            Critical {criticalCount}/{tasks.length}
+          </div>
         )}
       </div>
 
-      {error && <div style={{ color: "red", marginTop: 10 }}>Error: {error}</div>}
+      {error && (
+        <div
+          style={{
+            marginTop: 12,
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            color: "#991b1b",
+            padding: "10px 12px",
+            borderRadius: 12,
+            fontWeight: 700,
+          }}
+        >
+          Error: {error}
+        </div>
+      )}
 
-      <div style={{ marginTop: 10, color: "#666" }}>
-        Tasks: {tasks.length} | Dependencies: {deps.length}
+      <div style={{ marginTop: 10, color: "#475569", fontSize: 12, fontWeight: 700 }}>
+        Tasks: {tasks.length} &nbsp;|&nbsp; Dependencies: {deps.length}
       </div>
 
       {showNetwork && tasks.length > 0 && (
@@ -354,92 +484,146 @@ const version =
         />
       )}
 
-      <table
-        border="1"
-        cellPadding="6"
-        style={{ marginTop: 20, borderCollapse: "collapse", width: "100%" }}
-      >
-        <thead>
-          <tr>
-            <th>Workstream</th>
-            <th>Task</th>
-            <th>Dur</th>
-            <th>ES</th>
-            <th>EF</th>
-            <th>LS</th>
-            <th>LF</th>
-            <th>Float</th>
-            <th>Critical</th>
-            <th>Dependencies (Edit Type + Lag)</th>
-          </tr>
-        </thead>
+      <div style={{ marginTop: 18 }}>
+        <div style={{ fontWeight: 900, marginBottom: 10 }}>Task Table</div>
 
-        <tbody>
-          {tasks.map((t) => (
-            <TaskRow
-              key={normId(t.TaskId)}
-              task={t}
-              taskById={taskById}
-              depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
-              disabled={loading}
-              getDepId={getDepId}
-              getPredId={getPredId}
-              getLag={getLag}
-              getType={getType}
-              onSaveDuration={async (newDur) => {
-                setError("");
-                setLoading(true);
-                try {
-                  await updateDuration(t.TaskId, newDur);
-                  await recalcAndReload();
-                } catch (e) {
-                  setError(e.message || String(e));
-                } finally {
-                  setLoading(false);
-                }
-              }}
-              onUpdateDep={async (depId, type, lag) => {
-                setError("");
-                setLoading(true);
-                try {
-                  await updateDependency(depId, type, lag);
-                  await recalcAndReload();
-                } catch (e) {
-                  setError(e.message || String(e));
-                } finally {
-                  setLoading(false);
-                }
-              }}
-              onRemoveDep={async (depId) => {
-                setError("");
-                setLoading(true);
-                try {
-                  await deleteDependency(depId);
-                  await recalcAndReload();
-                } catch (e) {
-                  setError(e.message || String(e));
-                } finally {
-                  setLoading(false);
-                }
-              }}
-            />
-          ))}
+        <div
+          style={{
+            background: "#ffffff",
+            border: "1px solid #e2e8f0",
+            borderRadius: 12,
+            overflow: "hidden",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+          }}
+        >
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "separate",
+              borderSpacing: 0,
+              fontSize: 13,
+            }}
+          >
+            <thead style={{ background: "#f1f5f9" }}>
+              <tr>
+                {[
+                  "Workstream",
+                  "Task",
+                  "Dur",
+                  "ES",
+                  "EF",
+                  "LS",
+                  "LF",
+                  "Float",
+                  "Critical",
+                  "Dependencies (Edit Type + Lag)",
+                ].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      textAlign: "left",
+                      padding: "10px 10px",
+                      borderBottom: "1px solid #e2e8f0",
+                      fontWeight: 900,
+                      color: "#0f172a",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
 
-          {tasks.length === 0 && (
-            <tr>
-              <td colSpan={10} style={{ padding: 14, color: "#666" }}>
-                No tasks found.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            <tbody>
+              {tasks.map((t, idx) => (
+                <TaskRow
+                  key={normId(t.TaskId)}
+                  rowIndex={idx}
+                  task={t}
+                  taskById={taskById}
+                  depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
+                  disabled={loading}
+                  getDepId={getDepId}
+                  getPredId={getPredId}
+                  getLag={getLag}
+                  getType={getType}
+                  onSaveDuration={async (newDur) => {
+                    setError("");
+                    setLoading(true);
+                    try {
+                      await updateDuration(t.TaskId, newDur);
+                      await recalcAndReload();
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  onUpdateDep={async (depId, type, lag) => {
+                    setError("");
+                    setLoading(true);
+                    try {
+                      await updateDependency(depId, type, lag);
+                      await recalcAndReload();
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  onRemoveDep={async (depId) => {
+                    setError("");
+                    setLoading(true);
+                    try {
+                      await deleteDependency(depId);
+                      await recalcAndReload();
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                />
+              ))}
 
-      <div style={{ marginTop: 12, color: "#666" }}>
-        Note: ES/EF/LS/LF/Float/Critical are computed. Edit only Duration and existing Dependencies
-        (Type/Lag). No “Add Dependency” is provided.
+              {tasks.length === 0 && (
+                <tr>
+                  <td colSpan={10} style={{ padding: 14, color: "#475569" }}>
+                    No tasks found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ marginTop: 12, color: "#475569", fontSize: 12 }}>
+          Note: ES/EF/LS/LF/Float/Critical are computed. Edit only Duration and existing Dependencies
+          (Type/Lag). No “Add Dependency” is provided.
+        </div>
       </div>
     </div>
+  );
+}
+
+/** =========================
+ *  Spinner
+ *  ========================= */
+function Spinner({ size = 18 }) {
+  return (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: "50%",
+        border: "2px solid #cbd5e1",
+        borderTopColor: "#0f172a",
+        display: "inline-block",
+        animation: "spin 0.8s linear infinite",
+        flex: "0 0 auto",
+      }}
+    />
   );
 }
 
@@ -447,6 +631,7 @@ const version =
  *  Task Table Row
  *  ========================= */
 function TaskRow({
+  rowIndex,
   task,
   taskById,
   depsForTask,
@@ -464,20 +649,39 @@ function TaskRow({
 
   useEffect(() => setDur(task.DurationDays ?? ""), [task.DurationDays]);
 
-  return (
-    <tr style={{ background: isCrit ? "#ffeeba" : "white" }}>
-      <td>{task.Workstream ?? ""}</td>
-      <td>{task.TaskName ?? ""}</td>
+  const rowBg = rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff";
+  const critBg = "#fff7ed";
 
-      <td>
+  return (
+    <tr style={{ background: isCrit ? critBg : rowBg }}>
+      <td style={cell()}>{task.Workstream ?? ""}</td>
+      <td style={cell({ fontWeight: 800 })}>{task.TaskName ?? ""}</td>
+
+      <td style={cell()}>
         <input
-          style={{ width: 70 }}
+          style={{
+            width: 70,
+            padding: "6px 8px",
+            borderRadius: 10,
+            border: "1px solid #cbd5e1",
+            outline: "none",
+          }}
           value={dur}
           onChange={(e) => setDur(e.target.value)}
           disabled={disabled}
         />
         <button
-          style={{ marginLeft: 8 }}
+          style={{
+            marginLeft: 8,
+            padding: "6px 10px",
+            borderRadius: 10,
+            border: "1px solid #cbd5e1",
+            background: "#0f172a",
+            color: "#fff",
+            fontWeight: 800,
+            cursor: disabled ? "not-allowed" : "pointer",
+            opacity: disabled ? 0.55 : 1,
+          }}
           onClick={() => onSaveDuration(dur === "" ? 0 : Number(dur))}
           disabled={disabled}
         >
@@ -485,16 +689,18 @@ function TaskRow({
         </button>
       </td>
 
-      <td>{task.ES ?? ""}</td>
-      <td>{task.EF ?? ""}</td>
-      <td>{task.LS ?? ""}</td>
-      <td>{task.LF ?? ""}</td>
-      <td>{task.TotalFloat ?? ""}</td>
-      <td>{isCrit ? "YES" : ""}</td>
+      <td style={cell()}>{task.ES ?? ""}</td>
+      <td style={cell()}>{task.EF ?? ""}</td>
+      <td style={cell()}>{task.LS ?? ""}</td>
+      <td style={cell()}>{task.LF ?? ""}</td>
+      <td style={cell()}>{task.TotalFloat ?? ""}</td>
+      <td style={cell({ fontWeight: 900, color: isCrit ? "#b45309" : "#0f172a" })}>
+        {isCrit ? "YES" : ""}
+      </td>
 
-      <td>
+      <td style={cell({ minWidth: 420 })}>
         {depsForTask.length === 0 ? (
-          <span style={{ color: "#666" }}>(none)</span>
+          <span style={{ color: "#64748b" }}>(none)</span>
         ) : (
           <ul style={{ margin: 0, paddingLeft: 18 }}>
             {depsForTask.map((d) => {
@@ -525,15 +731,17 @@ function TaskRow({
   );
 }
 
-function DepEditor({
-  depId,
-  predName,
-  initialType,
-  initialLag,
-  disabled,
-  onUpdate,
-  onRemove,
-}) {
+function cell(extra = {}) {
+  return {
+    padding: "10px 10px",
+    borderBottom: "1px solid #eef2f7",
+    verticalAlign: "top",
+    color: "#0f172a",
+    ...extra,
+  };
+}
+
+function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdate, onRemove }) {
   const [type, setType] = useState((initialType || "FS").toUpperCase());
   const [lag, setLag] = useState(String(initialLag ?? 0));
 
@@ -542,50 +750,87 @@ function DepEditor({
 
   const canEdit = Number.isFinite(Number(depId));
 
+  const selectStyle = {
+    padding: "6px 8px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#fff",
+    outline: "none",
+  };
+
+  const inputStyle = {
+    width: 70,
+    marginLeft: 8,
+    padding: "6px 8px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    outline: "none",
+  };
+
+  const btnMini = {
+    marginLeft: 8,
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    background: "#ffffff",
+    color: "#0f172a",
+    fontWeight: 800,
+    cursor: disabled || !canEdit ? "not-allowed" : "pointer",
+    opacity: disabled || !canEdit ? 0.55 : 1,
+  };
+
+  const btnDanger = {
+    ...btnMini,
+    background: "#fef2f2",
+    border: "1px solid #fecaca",
+    color: "#991b1b",
+  };
+
   return (
-    <li style={{ marginBottom: 6 }}>
-      <span style={{ display: "inline-block", minWidth: 260 }}>{predName}</span>
-
-      <select
-        value={type}
-        onChange={(e) => setType(e.target.value)}
-        disabled={disabled || !canEdit}
-      >
-        <option value="FS">FS</option>
-        <option value="SS">SS</option>
-        <option value="FF">FF</option>
-        <option value="SF">SF</option>
-      </select>
-
-      <input
-        style={{ width: 70, marginLeft: 8 }}
-        value={lag}
-        onChange={(e) => setLag(e.target.value)}
-        disabled={disabled || !canEdit}
-        placeholder="lag"
-      />
-
-      <button
-        style={{ marginLeft: 8 }}
-        onClick={() => onUpdate(depId, type, lag === "" ? 0 : Number(lag))}
-        disabled={disabled || !canEdit}
-      >
-        Update
-      </button>
-
-      <button
-        style={{ marginLeft: 8 }}
-        onClick={() => onRemove(depId)}
-        disabled={disabled || !canEdit}
-      >
-        Remove
-      </button>
-
-      {!canEdit && (
-        <span style={{ marginLeft: 10, color: "red", fontSize: 12 }}>
-          Missing TaskDependencyId in getDependencies API
+    <li style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        <span style={{ display: "inline-block", minWidth: 260, fontWeight: 700, color: "#0f172a" }}>
+          {predName}
         </span>
-      )}
+
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value)}
+          disabled={disabled || !canEdit}
+          style={selectStyle}
+        >
+          <option value="FS">FS</option>
+          <option value="SS">SS</option>
+          <option value="FF">FF</option>
+          <option value="SF">SF</option>
+        </select>
+
+        <input
+          style={inputStyle}
+          value={lag}
+          onChange={(e) => setLag(e.target.value)}
+          disabled={disabled || !canEdit}
+          placeholder="lag"
+        />
+
+        <button
+          style={{ ...btnMini, background: "#0f172a", color: "#fff", border: "1px solid #0f172a" }}
+          onClick={() => onUpdate(depId, type, lag === "" ? 0 : Number(lag))}
+          disabled={disabled || !canEdit}
+        >
+          Update
+        </button>
+
+        <button style={btnDanger} onClick={() => onRemove(depId)} disabled={disabled || !canEdit}>
+          Remove
+        </button>
+
+        {!canEdit && (
+          <span style={{ marginLeft: 6, color: "#b91c1c", fontSize: 12, fontWeight: 800 }}>
+            Missing TaskDependencyId in getDependencies API
+          </span>
+        )}
+      </div>
     </li>
   );
 }
@@ -644,9 +889,20 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
 
   return (
     <div style={{ marginTop: 22 }}>
-      <h3 style={{ marginBottom: 10 }}>Gantt (Linked) — Links: {links.length}</h3>
+      <div style={{ fontWeight: 900, marginBottom: 10 }}>
+        Gantt (Linked) — Links: {links.length}
+      </div>
 
-      <div style={{ overflowX: "auto", border: "1px solid #ddd", padding: 12 }}>
+      <div
+        style={{
+          overflowX: "auto",
+          border: "1px solid #e2e8f0",
+          background: "#ffffff",
+          borderRadius: 12,
+          padding: 12,
+          boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+        }}
+      >
         <div style={{ position: "relative", width: canvasW, height: canvasH }}>
           <div
             style={{
@@ -655,7 +911,8 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
               top: 0,
               height: HEADER_H,
               width: LEFT_COL_W,
-              fontWeight: "bold",
+              fontWeight: 900,
+              color: "#0f172a",
             }}
           >
             Task
@@ -681,9 +938,9 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                     left: i * PX_PER_DAY,
                     top: 0,
                     height: HEADER_H,
-                    borderLeft: "1px solid #eee",
+                    borderLeft: "1px solid #eef2f7",
                     fontSize: 11,
-                    color: "#666",
+                    color: "#64748b",
                     paddingLeft: 2,
                     whiteSpace: "nowrap",
                   }}
@@ -744,12 +1001,12 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                     display: "flex",
                     alignItems: "center",
                     height: ROW_H,
-                    borderBottom: "1px solid #f3f3f3",
+                    borderBottom: "1px solid #f1f5f9",
                   }}
                 >
                   <div style={{ width: LEFT_COL_W, paddingRight: 10 }}>
-                    <div style={{ fontWeight: 600 }}>{t.TaskName}</div>
-                    <div style={{ fontSize: 12, color: "#666" }}>
+                    <div style={{ fontWeight: 800 }}>{t.TaskName}</div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>
                       {t.Workstream} | ES {t.ES} EF {t.EF}
                     </div>
                   </div>
@@ -760,7 +1017,8 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                       height: ROW_H,
                       width: timelineW,
                       background: "#fafafa",
-                      border: "1px solid #f0f0f0",
+                      border: "1px solid #f1f5f9",
+                      borderRadius: 8,
                     }}
                   >
                     <div
@@ -770,7 +1028,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                         top: BAR_TOP_OFFSET,
                         height: BAR_H,
                         width,
-                        borderRadius: 4,
+                        borderRadius: 6,
                         background: isCrit ? "#f59e0b" : "#94a3b8",
                       }}
                     />
@@ -782,7 +1040,7 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
         </div>
       </div>
 
-      <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+      <div style={{ marginTop: 8, fontSize: 12, color: "#64748b" }}>
         Lines are drawn predecessor → successor for visibility. Actual scheduling behavior depends on backend LinkType/LagDays.
       </div>
     </div>
@@ -867,10 +1125,21 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
   if (!nodes.length) return null;
 
   return (
-    <div style={{ marginTop: 16, border: "1px solid #ddd", padding: 12 }}>
-      <h3 style={{ margin: "0 0 10px 0" }}>Network Diagram (Critical Path Highlight)</h3>
+    <div
+      style={{
+        marginTop: 16,
+        border: "1px solid #e2e8f0",
+        padding: 12,
+        borderRadius: 12,
+        background: "#ffffff",
+        boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
+      }}
+    >
+      <div style={{ fontWeight: 900, margin: "0 0 10px 0" }}>
+        Network Diagram (Critical Path Highlight)
+      </div>
 
-      <div style={{ fontSize: 12, color: "#666", marginBottom: 10 }}>
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
         Nodes with orange border are tasks where IsCritical=true.
       </div>
 
@@ -894,12 +1163,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
                 markerEnd="url(#arrowNet)"
                 opacity="0.85"
               />
-              <text
-                x={(e.x1 + e.x2) / 2}
-                y={(e.y1 + e.y2) / 2 - 6}
-                fontSize="11"
-                fill="#444"
-              >
+              <text x={(e.x1 + e.x2) / 2} y={(e.y1 + e.y2) / 2 - 6} fontSize="11" fill="#444">
                 {e.label}
               </text>
             </g>
