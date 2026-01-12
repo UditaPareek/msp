@@ -928,8 +928,10 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
             }}
           >
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
-              if (i % 5 !== 0) return null;
+              if (i % TICK_STEP !== 0) return null;
+            
               const day = minStart + i;
+            
               return (
                 <div
                   key={day}
@@ -941,8 +943,9 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
                     borderLeft: "1px solid #eef2f7",
                     fontSize: 11,
                     color: "#64748b",
-                    paddingLeft: 2,
+                    paddingLeft: 6,
                     whiteSpace: "nowrap",
+                    userSelect: "none",
                   }}
                 >
                   {day}
@@ -993,6 +996,18 @@ function GanttLiteLinked({ tasks, deps, getPredId, getSuccId, getDepId }) {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
               const left = (t.ES - minStart) * PX_PER_DAY;
               const width = Math.max(1, (t.EF - t.ES) * PX_PER_DAY);
+        // Choose a readable tick step based on pixel density
+        const pickTickStep = (pxPerDay) => {
+          const minLabelPx = 80; // increase to 90/100 if you want fewer labels
+          const raw = Math.ceil(minLabelPx / Math.max(1, pxPerDay));
+        
+          // snap to "nice" steps so labels look intentional
+          const nice = [1, 2, 3, 5, 7, 10, 14, 21, 28, 30];
+          return nice.find((s) => s >= raw) || raw;
+        };
+        
+        const TICK_STEP = pickTickStep(PX_PER_DAY);
+
 
               return (
                 <div
