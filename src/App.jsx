@@ -690,13 +690,17 @@ export default function App() {
                 loiDate,
                 commissioningContractDate,
                 commissioningInternalDate,
-                milestones, // still send the entire milestone object
+                milestones,
               });
-
+              
               const newId = String(out.projectId);
+              
+              // IMPORTANT: after createProject, force backend to generate TaskSchedule
+              await recalcOnly(newId);      // or recalcAndReload(newId) if you want single call
+              
               setProjectId(newId);
               setShowNewProject(false);
-              await loadAll(newId);
+              await loadAll(newId);         // loads latest version schedule created by recalc
               setActiveTab("dashboard");
             } catch (e) {
               setError(e.message || String(e));
