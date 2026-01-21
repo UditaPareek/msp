@@ -3,38 +3,12 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite — App.jsx (Professional + New Project + Date-based targets)
+ * MSP Lite — App.jsx (Gantt with dependency connectors + task popup)
  *
- * Your requirements implemented in UI (WITHOUT breaking existing API contract):
- * 1) Target dates shown as dd-MMM-yy (NOT day numbers)
- *    - Uses project LOI date as Project Start (projectStartDate)
- *    - Converts ES/EF/LS/LF day numbers -> real dates
- *
- * 2) MSP-like UI (less cluttered)
- *    - Top nav + project bar + tabs
- *    - Clean task grid + date columns
- *    - Gantt uses date ticks (weekly) not raw day labels
- *
- * 3) New Project from UI (calls POST /createProject)
- *    - LOI required (Project Start)
- *    - Commissioning (Contract) required
- *    - Buffer policy fixed 30 days (UI sends 30; backend may ignore if hardcoded)
- *    - Internal commissioning derived = Contract - 30 days (display + sent)
- *    - Milestone capture included
- *
- * IMPORTANT:
- * - "Ratio-based duration scaling" MUST be done in backend /createProject.
- *   UI cannot safely do it because template duration (T = MAX(EF)) lives in SQL.
- *   UI simply sends LOI + commissioning contract + bufferDays=30 + templateName.
- *
- * Assumed APIs:
- * - GET  /getSchedule?projectId=...&versionId=latest
- * - GET  /getDependencies?projectId=...
- * - POST /updateTask
- * - POST /updateDependency
- * - POST /deleteDependency
- * - POST /createProject   (must implement ratio scaling inside)
- * - POST /recalculate?projectId=... (optional; used after edits)
+ * Changes implemented:
+ * 1) Gantt shows dependency connections (lines with arrows) using deps already loaded.
+ * 2) Clicking a task bar opens popup with predecessors + successors.
+ * 3) New Project modal does NOT show template selector; always uses Solar EPC Master v1.
  */
 
 const TABS = [
@@ -45,6 +19,9 @@ const TABS = [
 ];
 
 const BUFFER_DAYS_FIXED = 30;
+
+// Fixed template name (per your requirement)
+const FIXED_TEMPLATE_NAME = "Solar EPC Master v1";
 
 const MILESTONE_FIELDS = [
   { key: "LOI", label: "LOI (Project Start)", required: true },
@@ -72,6 +49,9 @@ export default function App() {
   const [deps, setDeps] = useState([]);
 
   const [showNewProject, setShowNewProject] = useState(false);
+
+  // Gantt task popup
+  const [selectedTaskId, setSelectedTaskId] = useState(null);
 
   /* -------------------- tolerant parsing -------------------- */
   const normId = (v) => (v == null ? null : String(v));
@@ -135,20 +115,16 @@ export default function App() {
   };
 
   /* -------------------- date model (LOI = project start) -------------------- */
-  // Best: backend returns schedule.project.projectStartDate (YYYY-MM-DD)
-  // Fallback: if backend returns milestones array/object, read LOI there.
   const projectStartDate = useMemo(() => {
     const direct = parseISO(project?.projectStartDate);
     if (direct) return direct;
 
-    // fallback: milestones as object
     if (project?.milestones && typeof project.milestones === "object") {
       const m = project.milestones;
       const loi = parseISO(m.LOI || m.loi || m.loiDate);
       if (loi) return loi;
     }
 
-    // fallback: milestones as array
     if (Array.isArray(project?.Milestones)) {
       const loiRow = project.Milestones.find((x) => String(x?.Key || x?.key) === "LOI");
       const loi = parseISO(loiRow?.Date || loiRow?.date || loiRow?.Value || loiRow?.value);
@@ -183,6 +159,50 @@ export default function App() {
     for (const t of tasks || []) m.set(normId(t.TaskId), t);
     return m;
   }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* -------------------- deps maps for popup -------------------- */
+  const depPairs = useMemo(() => {
+    // normalize deps into (predId, succId, type, lag, depId)
+    const out = [];
+    for (const d of deps || []) {
+      const pred = normId(getPredId(d));
+      const succ = normId(getSuccId(d));
+      if (!pred || !succ) continue;
+      out.push({
+        depId: getDepId(d),
+        predId: pred,
+        succId: succ,
+        type: getType(d),
+        lag: getLag(d),
+        raw: d,
+      });
+    }
+    return out;
+  }, [deps]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const predecessorsByTask = useMemo(() => {
+    const m = new Map();
+    for (const e of depPairs) {
+      const arr = m.get(e.succId) || [];
+      arr.push(e);
+      m.set(e.succId, arr);
+    }
+    return m;
+  }, [depPairs]);
+
+  const successorsByTask = useMemo(() => {
+    const m = new Map();
+    for (const e of depPairs) {
+      const arr = m.get(e.predId) || [];
+      arr.push(e);
+      m.set(e.predId, arr);
+    }
+    return m;
+  }, [depPairs]);
+
+  const selectedTask = selectedTaskId ? taskById.get(normId(selectedTaskId)) : null;
+  const selectedPreds = selectedTaskId ? (predecessorsByTask.get(normId(selectedTaskId)) || []) : [];
+  const selectedSuccs = selectedTaskId ? (successorsByTask.get(normId(selectedTaskId)) || []) : [];
 
   const depsBySuccessor = useMemo(() => {
     const m = new Map();
@@ -247,10 +267,12 @@ export default function App() {
         [];
 
       setDeps(Array.isArray(depsPayload) ? depsPayload : []);
+      setSelectedTaskId(null);
     } catch (e) {
       setError(e.message || String(e));
       setSchedule(null);
       setDeps([]);
+      setSelectedTaskId(null);
     } finally {
       setBusyMsg("");
       setLoading(false);
@@ -304,7 +326,6 @@ export default function App() {
         taskDependencyId: idNum,
         linkType: type,
         lagDays: lagNum,
-        // tolerate your backend casing:
         LinkType: type,
         LagDays: lagNum,
       }),
@@ -413,23 +434,23 @@ export default function App() {
       <div style={s.content}>
         <div style={s.projectBar}>
           <div style={s.projectLeft}>
-            <div style={s.projectName}>
-              {project?.ProjectName ? project.ProjectName : "Load a Project"}
-            </div>
+            <div style={s.projectName}>{project?.ProjectName ? project.ProjectName : "Load a Project"}</div>
 
             <div style={s.projectMeta}>
-              <span>ProjectId: <b>{project?.ProjectId ?? projectId}</b></span>
-              <span>•</span>
-              <span>Version: <b>{version?.versionNo ?? "-"}</b></span>
-              <span>•</span>
               <span>
-                LOI Start:{" "}
-                <b>{projectStartDate ? fmtDDMMMYY(projectStartDate) : "-"}</b>
+                ProjectId: <b>{project?.ProjectId ?? projectId}</b>
               </span>
               <span>•</span>
               <span>
-                Finish:{" "}
-                <b>{kpi.finishDate ? fmtDDMMMYY(kpi.finishDate) : "-"}</b>
+                Version: <b>{version?.versionNo ?? "-"}</b>
+              </span>
+              <span>•</span>
+              <span>
+                LOI Start: <b>{projectStartDate ? fmtDDMMMYY(projectStartDate) : "-"}</b>
+              </span>
+              <span>•</span>
+              <span>
+                Finish: <b>{kpi.finishDate ? fmtDDMMMYY(kpi.finishDate) : "-"}</b>
               </span>
               <span>•</span>
               <span>
@@ -441,19 +462,10 @@ export default function App() {
           <div style={s.projectRight}>
             <label style={s.inlineLabel}>
               Project ID
-              <input
-                value={projectId}
-                onChange={(e) => setProjectId(e.target.value)}
-                style={s.input}
-                disabled={loading}
-              />
+              <input value={projectId} onChange={(e) => setProjectId(e.target.value)} style={s.input} disabled={loading} />
             </label>
 
-            <button
-              onClick={() => loadAll(projectId)}
-              disabled={loading}
-              style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}
-            >
+            <button onClick={() => loadAll(projectId)} disabled={loading} style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}>
               Load
             </button>
 
@@ -472,9 +484,8 @@ export default function App() {
 
         {needsStartDate && (
           <div style={s.warn}>
-            Missing LOI/projectStartDate from API.  
-            UI cannot show correct dd-MMM-yy target dates until backend returns LOI as <code>project.projectStartDate</code>
-            (or milestones include LOI).
+            Missing LOI/projectStartDate from API. UI cannot show dd-MMM-yy target dates until backend returns LOI as{" "}
+            <code>project.projectStartDate</code> (or milestones include LOI).
           </div>
         )}
 
@@ -502,11 +513,17 @@ export default function App() {
                 <div style={s.cardHeader}>
                   <div>
                     <div style={s.cardTitle}>Gantt Preview</div>
-                    <div style={s.cardSub}>Clean date-based axis (weekly ticks).</div>
+                    <div style={s.cardSub}>Now includes dependency connectors. Click a bar for predecessors/successors.</div>
                   </div>
                 </div>
                 {tasks.length && projectStartDate ? (
-                  <GanttDates tasks={tasks} startDate={projectStartDate} compact />
+                  <GanttDates
+                    tasks={tasks}
+                    deps={deps}
+                    startDate={projectStartDate}
+                    compact
+                    onTaskClick={(id) => setSelectedTaskId(id)}
+                  />
                 ) : (
                   <EmptyState text="Load a project (and LOI) to see a date-based Gantt." />
                 )}
@@ -551,13 +568,18 @@ export default function App() {
           <div style={s.card}>
             <div style={s.cardHeader}>
               <div>
-                <div style={s.cardTitle}>Gantt (Target Dates)</div>
-                <div style={s.cardSub}>Weekly ticks. Bars represent ES→EF (target schedule).</div>
+                <div style={s.cardTitle}>Gantt (Target Dates + Connections)</div>
+                <div style={s.cardSub}>Bars represent ES→EF. Lines represent dependencies. Click a bar for details.</div>
               </div>
             </div>
 
             {tasks.length && projectStartDate ? (
-              <GanttDates tasks={tasks} startDate={projectStartDate} />
+              <GanttDates
+                tasks={tasks}
+                deps={deps}
+                startDate={projectStartDate}
+                onTaskClick={(id) => setSelectedTaskId(id)}
+              />
             ) : (
               <EmptyState text="Load a project (and LOI) to view date-based Gantt." />
             )}
@@ -575,15 +597,7 @@ export default function App() {
             </div>
 
             {tasks.length ? (
-              <NetworkDiagram
-                tasks={tasks}
-                deps={deps}
-                getPredId={getPredId}
-                getSuccId={getSuccId}
-                getDepId={getDepId}
-                getLag={getLag}
-                getType={getType}
-              />
+              <NetworkDiagram tasks={tasks} deps={deps} getPredId={getPredId} getSuccId={getSuccId} getDepId={getDepId} getLag={getLag} getType={getType} />
             ) : (
               <EmptyState text="Load a project to view network." />
             )}
@@ -596,16 +610,10 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Task Table (Edit Duration / Dependencies)</div>
-                <div style={s.cardSub}>
-                  MSP logic: edit → backend recalculates → UI reload.
-                </div>
+                <div style={s.cardSub}>MSP logic: edit → backend recalculates → UI reload.</div>
               </div>
               <div style={s.cardHeaderRight}>
-                <button
-                  style={{ ...s.btnDark, ...(loading ? s.btnDisabled : {}) }}
-                  disabled={loading}
-                  onClick={() => recalcAndReload(projectId)}
-                >
+                <button style={{ ...s.btnDark, ...(loading ? s.btnDisabled : {}) }} disabled={loading} onClick={() => recalcAndReload(projectId)}>
                   Recalculate
                 </button>
               </div>
@@ -672,6 +680,7 @@ export default function App() {
       {showNewProject && (
         <NewProjectModal
           bufferDays={BUFFER_DAYS_FIXED}
+          fixedTemplateName={FIXED_TEMPLATE_NAME}
           onClose={() => setShowNewProject(false)}
           loading={loading}
           onCreate={async ({ projectName, templateName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
@@ -679,10 +688,6 @@ export default function App() {
             setLoading(true);
             setBusyMsg("Creating project from template (ratio scaling in backend)...");
             try {
-              // NOTE: Your backend should use these to compute:
-              // N = (CommInternal - LOI) days
-              // T = MAX(EF) days from template’s latest version
-              // Ratio = N/T; scaled durations; insert tasks; insert dependencies; calc schedule; persist LOI as projectStartDate.
               const out = await createProject({
                 projectName,
                 templateName,
@@ -692,15 +697,12 @@ export default function App() {
                 commissioningInternalDate,
                 milestones,
               });
-              
+
               const newId = String(out.projectId);
-              
-              // IMPORTANT: after createProject, force backend to generate TaskSchedule
-              await recalcOnly(newId);      // or recalcAndReload(newId) if you want single call
-              
+              await recalcOnly(newId);
               setProjectId(newId);
               setShowNewProject(false);
-              await loadAll(newId);         // loads latest version schedule created by recalc
+              await loadAll(newId);
               setActiveTab("dashboard");
             } catch (e) {
               setError(e.message || String(e));
@@ -709,6 +711,19 @@ export default function App() {
               setLoading(false);
             }
           }}
+        />
+      )}
+
+      {/* Task Relations Popup (from Gantt click) */}
+      {selectedTask && (
+        <TaskRelationsModal
+          onClose={() => setSelectedTaskId(null)}
+          task={selectedTask}
+          dayToDate={dayToDate}
+          fmtDDMMMYY={fmtDDMMMYY}
+          preds={selectedPreds}
+          succs={selectedSuccs}
+          taskById={taskById}
         />
       )}
     </div>
@@ -764,13 +779,106 @@ function EmptyState({ text }) {
   return <div style={{ padding: 14, color: "#475569", fontWeight: 900 }}>{text}</div>;
 }
 
+/* -------------------- Task Relations Modal -------------------- */
+function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, fmtDDMMMYY }) {
+  const s = makeStyles();
+  const start = dayToDate(task.ES);
+  const finish = dayToDate(task.EF);
+
+  const fmtRel = (e) => {
+    const pred = taskById.get(String(e.predId || ""));
+    const succ = taskById.get(String(e.succId || ""));
+    return {
+      predName: pred ? `${pred.Workstream} — ${pred.TaskName}` : `TaskId ${String(e.predId)}`,
+      succName: succ ? `${succ.Workstream} — ${succ.TaskName}` : `TaskId ${String(e.succId)}`,
+      type: e.type || "FS",
+      lag: Number(e.lag || 0),
+    };
+  };
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <div>
+            <div style={s.modalTitle}>Task Relations</div>
+            <div style={s.modalSub}>Predecessors and successors for the selected task.</div>
+          </div>
+          <button style={s.iconBtn} onClick={onClose}>✕</button>
+        </div>
+
+        <div style={s.modalBody}>
+          <div style={s.relHeaderCard}>
+            <div style={{ fontWeight: 950, fontSize: 16 }}>{task.TaskName}</div>
+            <div style={s.relMeta}>
+              <span><b>Workstream:</b> {task.Workstream || "-"}</span>
+              <span>•</span>
+              <span><b>Duration:</b> {task.DurationDays ?? "-"}</span>
+              <span>•</span>
+              <span><b>Target:</b> {fmtDDMMMYY(start)} → {fmtDDMMMYY(finish)}</span>
+              <span>•</span>
+              <span><b>Critical:</b> {(task.IsCritical === 1 || task.IsCritical === true) ? "YES" : "NO"}</span>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+            <div style={s.relCard}>
+              <div style={s.relTitle}>Predecessors</div>
+              <div style={s.relSub}>Edges going into this task.</div>
+
+              {preds.length === 0 ? (
+                <div style={s.muted}>No predecessors.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {preds.map((e, i) => {
+                    const x = fmtRel(e);
+                    return (
+                      <div key={i} style={s.relRow}>
+                        <div style={s.relRowMain}>{x.predName}</div>
+                        <div style={s.relRowMeta}>{x.type}{x.lag ? ` +${x.lag}` : ""}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div style={s.relCard}>
+              <div style={s.relTitle}>Successors</div>
+              <div style={s.relSub}>Edges going out from this task.</div>
+
+              {succs.length === 0 ? (
+                <div style={s.muted}>No successors.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {succs.map((e, i) => {
+                    const x = fmtRel(e);
+                    return (
+                      <div key={i} style={s.relRow}>
+                        <div style={s.relRowMain}>{x.succName}</div>
+                        <div style={s.relRowMeta}>{x.type}{x.lag ? ` +${x.lag}` : ""}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={s.modalFooter}>
+          <button style={s.btn} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* -------------------- New Project Modal -------------------- */
-function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
+function NewProjectModal({ onClose, onCreate, loading, bufferDays, fixedTemplateName }) {
   const s = makeStyles();
 
   const [projectName, setProjectName] = useState("");
-  const [templateName, setTemplateName] = useState("Solar EPC Master v1");
-
   const [milestones, setMilestones] = useState(() => {
     const o = {};
     for (const f of MILESTONE_FIELDS) o[f.key] = "";
@@ -789,24 +897,17 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
   }, [commContract, bufferDays]);
 
   const canSubmit = useMemo(() => {
-    return (
-      projectName.trim().length > 0 &&
-      !!parseISO(loiDate) &&
-      !!parseISO(commContract)
-    );
+    return projectName.trim().length > 0 && !!parseISO(loiDate) && !!parseISO(commContract);
   }, [projectName, loiDate, commContract]);
 
   return (
     <div style={s.modalOverlay} onMouseDown={onClose}>
-      <div
-        style={s.modal}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
         <div style={s.modalHeader}>
           <div>
             <div style={s.modalTitle}>Create New Project</div>
             <div style={s.modalSub}>
-              LOI is Project Start. Internal COD is derived as Contract - {bufferDays} days. Backend must perform ratio scaling.
+              Template is fixed: <b>{fixedTemplateName}</b>. LOI is project start. Internal COD = Contract - {bufferDays} days.
             </div>
           </div>
           <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
@@ -824,21 +925,14 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
               />
             </Field>
 
-            <Field label="Template Name">
-              <input
-                style={s.inputWide}
-                value={templateName}
-                onChange={(e) => setTemplateName(e.target.value)}
-                disabled={loading}
-              />
+            <Field label="Template">
+              <input style={s.inputWide} value={fixedTemplateName} readOnly />
             </Field>
           </div>
 
           <div style={{ marginTop: 14 }}>
             <div style={s.sectionTitle}>Milestones</div>
-            <div style={s.sectionSub}>
-              Required: LOI + Commissioning (as per Contract).
-            </div>
+            <div style={s.sectionSub}>Required: LOI + Commissioning (as per Contract).</div>
 
             <div style={s.milestoneGrid}>
               {MILESTONE_FIELDS.map((f) => (
@@ -868,7 +962,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
             onClick={() => {
               onCreate({
                 projectName: projectName.trim(),
-                templateName: templateName.trim() || "Solar EPC Master v1",
+                templateName: fixedTemplateName,
                 milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate },
                 loiDate,
                 commissioningContractDate: commContract,
@@ -927,16 +1021,7 @@ function TaskTable({
       <table style={s.table}>
         <thead>
           <tr>
-            {[
-              "Workstream",
-              "Task",
-              "Dur",
-              "Target Start",
-              "Target Finish",
-              "Float",
-              "Critical",
-              "Dependencies (Type/Lag)",
-            ].map((h) => (
+            {["Workstream", "Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Type/Lag)"].map((h) => (
               <th key={h} style={s.th}>{h}</th>
             ))}
           </tr>
@@ -1029,9 +1114,7 @@ function TaskRow({
       <td style={s.tdMono}>{fmtDDMMMYY(startDt)}</td>
       <td style={s.tdMono}>{fmtDDMMMYY(finishDt)}</td>
       <td style={s.tdMono}>{task.TotalFloat ?? ""}</td>
-      <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>
-        {isCrit ? "YES" : ""}
-      </td>
+      <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
       <td style={{ ...s.td, minWidth: 520 }}>
         {depsForTask.length === 0 ? (
@@ -1078,25 +1161,14 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
     <div style={s.depRow}>
       <div style={s.depName}>{predName}</div>
 
-      <select
-        value={type}
-        onChange={(e) => setType(e.target.value)}
-        disabled={disabled || !canEdit}
-        style={s.select}
-      >
+      <select value={type} onChange={(e) => setType(e.target.value)} disabled={disabled || !canEdit} style={s.select}>
         <option value="FS">FS</option>
         <option value="SS">SS</option>
         <option value="FF">FF</option>
         <option value="SF">SF</option>
       </select>
 
-      <input
-        style={s.lagInput}
-        value={lag}
-        onChange={(e) => setLag(e.target.value)}
-        disabled={disabled || !canEdit}
-        type="number"
-      />
+      <input style={s.lagInput} value={lag} onChange={(e) => setLag(e.target.value)} disabled={disabled || !canEdit} type="number" />
 
       <button
         style={{ ...s.smallBtnDark, ...(disabled || !canEdit ? s.btnDisabled : {}) }}
@@ -1119,8 +1191,8 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
   );
 }
 
-/* -------------------- Date-based Gantt -------------------- */
-function GanttDates({ tasks, startDate, compact = false }) {
+/* -------------------- Date-based Gantt WITH CONNECTORS + CLICK -------------------- */
+function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
   const s = makeStyles();
   const normId = (v) => (v == null ? null : String(v));
 
@@ -1163,6 +1235,44 @@ function GanttDates({ tasks, startDate, compact = false }) {
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
+  // Build index: TaskId -> row index and bar geometry
+  const geom = useMemo(() => {
+    const m = new Map();
+    valid.forEach((t, idx) => {
+      const yMid = HEADER_H + idx * ROW_H + ROW_H / 2;
+      const xStart = LEFT_COL_W + (t.ES - minStart) * PX_PER_DAY;
+      const xEnd = LEFT_COL_W + (t.EF - minStart) * PX_PER_DAY;
+      m.set(normId(t.TaskId), { idx, yMid, xStart, xEnd, t });
+    });
+    return m;
+  }, [valid, HEADER_H, ROW_H, LEFT_COL_W, minStart, PX_PER_DAY]);
+
+  // Normalize deps
+  const edges = useMemo(() => {
+    const out = [];
+    (deps || []).forEach((d) => {
+      const pred = normId(
+        d.PredecessorTaskId ?? d.predecessorTaskId ?? d.PredecessorId ?? d.predId ?? d.predTaskId
+      );
+      const succ = normId(
+        d.SuccessorTaskId ?? d.successorTaskId ?? d.SuccessorId ?? d.succId ?? d.succTaskId
+      );
+      if (!pred || !succ) return;
+      const g1 = geom.get(pred);
+      const g2 = geom.get(succ);
+      if (!g1 || !g2) return;
+
+      const type = String(d.LinkType ?? d.linkType ?? "FS").toUpperCase();
+      const lag = Number(d.LagDays ?? d.lagDays ?? 0) || 0;
+
+      // For drawing: default FS-like visual (pred end -> succ start).
+      // Even if SS/FF/SF exist, we still draw end->start line for visibility.
+      // (If you want true SS/FF rendering, that is a next step.)
+      out.push({ pred, succ, type, lag, from: g1, to: g2 });
+    });
+    return out;
+  }, [deps, geom]);
+
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
       <div style={{ overflowX: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
@@ -1201,15 +1311,54 @@ function GanttDates({ tasks, startDate, compact = false }) {
             })}
           </div>
 
+          {/* SVG overlay for dependency connectors */}
+          <svg
+            width={canvasW}
+            height={canvasH}
+            style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}
+          >
+            <defs>
+              <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <path d="M0,0 L9,3 L0,6 Z" fill="#111" />
+              </marker>
+            </defs>
+
+            {edges.map((e, idx) => {
+              // routing: horizontal -> vertical -> horizontal (clean orthogonal)
+              const x1 = e.from.xEnd;
+              const y1 = e.from.yMid;
+              const x2 = e.to.xStart;
+              const y2 = e.to.yMid;
+
+              const midX = Math.min(x1 + 20, (x1 + x2) / 2);
+
+              // path segments
+              const d = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+
+              return (
+                <path
+                  key={idx}
+                  d={d}
+                  fill="none"
+                  stroke="#111"
+                  strokeWidth="1.3"
+                  opacity="0.35"
+                  markerEnd="url(#arrowGantt)"
+                />
+              );
+            })}
+          </svg>
+
           {/* rows */}
           <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
-              const left = LEFT_COL_W + (t.ES - minStart) * PX_PER_DAY;
               const w = Math.max(1, (t.EF - t.ES) * PX_PER_DAY);
 
               const sDt = dayToDate(t.ES);
               const fDt = dayToDate(t.EF);
+
+              const barLeft = (t.ES - minStart) * PX_PER_DAY;
 
               return (
                 <div
@@ -1230,16 +1379,22 @@ function GanttDates({ tasks, startDate, compact = false }) {
                   </div>
 
                   <div style={{ position: "relative", width: timelineW, background: "#fafafa" }}>
-                    <div
+                    <button
+                      type="button"
+                      onClick={() => onTaskClick && onTaskClick(t.TaskId)}
                       style={{
                         position: "absolute",
-                        left: (t.ES - minStart) * PX_PER_DAY,
+                        left: barLeft,
                         top: (ROW_H - BAR_H) / 2,
                         height: BAR_H,
                         width: w,
                         borderRadius: 7,
                         background: isCrit ? "#f59e0b" : "#94a3b8",
+                        border: "1px solid rgba(15,23,42,0.15)",
+                        cursor: "pointer",
+                        padding: 0,
                       }}
+                      title="Click to view predecessors/successors"
                     />
                   </div>
                 </div>
@@ -1329,9 +1484,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 
   return (
     <div style={{ padding: 14 }}>
-      <div style={s.note}>
-        Nodes with orange border are critical tasks. Edges show type + lag.
-      </div>
+      <div style={s.note}>Nodes with orange border are critical tasks. Edges show type + lag.</div>
 
       <div style={{ overflow: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
@@ -1357,17 +1510,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 
             return (
               <g key={n.id}>
-                <rect
-                  x={x}
-                  y={y}
-                  width={n.w}
-                  height={n.h}
-                  rx="10"
-                  ry="10"
-                  fill={isCrit ? "#fff7ed" : "#f8fafc"}
-                  stroke={isCrit ? "#f59e0b" : "#94a3b8"}
-                  strokeWidth={isCrit ? "3" : "2"}
-                />
+                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill={isCrit ? "#fff7ed" : "#f8fafc"} stroke={isCrit ? "#f59e0b" : "#94a3b8"} strokeWidth={isCrit ? "3" : "2"} />
                 <text x={x + 10} y={y + 22} fontSize="12" fontWeight="700" fill="#111">
                   {n.task.TaskName}
                 </text>
@@ -1391,7 +1534,6 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
    ========================================================= */
 function parseISO(s) {
   if (!s) return null;
-  // Force midnight local to avoid timezone shifting
   const d = new Date(String(s).slice(0, 10) + "T00:00:00");
   return isNaN(d.getTime()) ? null : d;
 }
@@ -1403,7 +1545,7 @@ function toISO(d) {
 }
 
 /* =========================================================
-   Styles
+   Styles (same as your existing)
    ========================================================= */
 function makeStyles() {
   const pageBg = "#f6f8fb";
@@ -1712,5 +1854,25 @@ function makeStyles() {
       outline: "none",
       background: "#fff",
     },
+
+    // relations modal extra
+    relHeaderCard: {
+      background: "#f8fafc",
+      border: "1px solid #e5eaf0",
+      borderRadius: 14,
+      padding: 12,
+    },
+    relMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900, marginTop: 6 },
+    relCard: {
+      background: "#ffffff",
+      border: "1px solid #e5eaf0",
+      borderRadius: 14,
+      padding: 12,
+    },
+    relTitle: { fontWeight: 950 },
+    relSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4, marginBottom: 10 },
+    relRow: { padding: "10px 10px", border: "1px solid #eef2f7", borderRadius: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 },
+    relRowMain: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    relRowMeta: { fontSize: 12, color: sub, fontWeight: 900, whiteSpace: "nowrap" },
   };
 }
