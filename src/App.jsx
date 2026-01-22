@@ -369,12 +369,12 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
     return json;
   }
-  async function updateDependencyApi({ dependencyId, linkType, lagDays }) {
+  async function updateDependencyApi({ taskDependencyId, linkType, lagDays }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dependencyId,
+        taskDependencyId,
         linkType: String(linkType || "FS").toUpperCase(),
         lagDays: Number.isFinite(Number(lagDays)) ? Number(lagDays) : 0,
       }),
@@ -383,11 +383,11 @@ export default function App() {
     return json;
   }
   
-  async function deleteDependencyApi({ dependencyId }) {
+  async function deleteDependencyApi({ taskDependencyId }) {
     const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dependencyId }),
+      body: JSON.stringify({ taskDependencyId }),
     });
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
     return json;
@@ -757,12 +757,12 @@ export default function App() {
                   setError(e.message || String(e));
                 }
               }}
-              onUpdateDep={async ({ dependencyId, linkType, lagDays }) => {
+              onUpdateDep={async ({ taskDependencyId, linkType, lagDays }) => {
                 try {
                   setError("");
                   setLoading(true);
                   setBusyMsg("Updating dependency...");
-                  await updateDependencyApi({ dependencyId, linkType, lagDays });
+                  await updateDependencyApi({ taskDependencyId, linkType, lagDays });
                   await recalcAndReload(projectId);
                 } catch (e) {
                   setError(e.message || String(e));
@@ -771,12 +771,12 @@ export default function App() {
                   setLoading(false);
                 }
               }}
-              onDeleteDep={async ({ dependencyId }) => {
+              onDeleteDep={async ({ taskDependencyId }) => {
                 try {
                   setError("");
                   setLoading(true);
                   setBusyMsg("Deleting dependency...");
-                  await deleteDependencyApi({ dependencyId });
+                  await deleteDependencyApi({ taskDependencyId });
                   await recalcAndReload(projectId);
                 } catch (e) {
                   setError(e.message || String(e));
@@ -1250,7 +1250,7 @@ function PerTaskDependencies({
     });
     return m;
   }, [tasks]);
-
+  const succLabel = taskLabelById.get(succ) || `TaskId ${succ}`;
   // existing deps INTO this successor
   const existing = useMemo(() => {
     return (depPairs || [])
@@ -1299,10 +1299,11 @@ function PerTaskDependencies({
               <DepRow
                 key={d.depId}
                 dep={d}
-                predLabel={taskLabelById.get(d.predId) || `TaskId ${d.predId}`}
+                fromLabel={taskLabelById.get(d.predId) || `TaskId ${d.predId}`}
+                toLabel={succLabel}
                 disabled={disabled}
                 onSave={(next) => onUpdateDep(next)}
-                onDelete={(id) => onDeleteDep({ dependencyId: id })}
+                onDelete={(id) => onDeleteDep({ taskDependencyId: id })}
               />
             ))}
           </div>
@@ -1367,8 +1368,9 @@ function PerTaskDependencies({
   );
 }
 
-function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
+function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   const s = makeStyles();
+
   const [type, setType] = useState(dep.type || "FS");
   const [lag, setLag] = useState(String(dep.lag ?? 0));
   const [dirty, setDirty] = useState(false);
@@ -1379,15 +1381,31 @@ function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
     setDirty(false);
   }, [dep.depId, dep.type, dep.lag]);
 
-  const canSave = !disabled && dirty;
+  const hasId = Number.isFinite(Number(dep.depId));
+  const canSave = !disabled && dirty && hasId;
 
   return (
-    <div style={s.depRow}>
-      <div style={s.depPred} title={predLabel}>{predLabel}</div>
+    <div style={s.depRow2}>
+      <div style={s.depFromTo}>
+        <div style={s.depLine} title={fromLabel}>
+          <span style={s.depTag}>FROM</span>
+          <span style={s.depText}>{fromLabel}</span>
+        </div>
+        <div style={s.depLine} title={toLabel}>
+          <span style={s.depTag}>TO</span>
+          <span style={s.depText}>{toLabel}</span>
+        </div>
+
+        {!hasId && (
+          <div style={s.depInlineWarn}>
+            Missing TaskDependencyId from API. Update/Delete disabled.
+          </div>
+        )}
+      </div>
 
       <select
         value={type}
-        disabled={disabled}
+        disabled={disabled || !hasId}
         onChange={(e) => {
           setType(e.target.value);
           setDirty(true);
@@ -1403,7 +1421,7 @@ function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
       <input
         type="number"
         value={lag}
-        disabled={disabled}
+        disabled={disabled || !hasId}
         onChange={(e) => {
           setLag(e.target.value);
           setDirty(true);
@@ -1417,7 +1435,7 @@ function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
         disabled={!canSave}
         onClick={() =>
           onSave({
-            dependencyId: dep.depId,
+            taskDependencyId: dep.depId,
             linkType: type,
             lagDays: lag === "" ? 0 : Number(lag) || 0,
           })
@@ -1427,8 +1445,8 @@ function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
       </button>
 
       <button
-        style={s.smallBtnDanger}
-        disabled={disabled}
+        style={{ ...s.smallBtnDanger, ...(disabled || !hasId ? s.btnDisabled : {}) }}
+        disabled={disabled || !hasId}
         onClick={() => onDelete(dep.depId)}
       >
         Delete
@@ -1436,6 +1454,7 @@ function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
     </div>
   );
 }
+
 
 /* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
 function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskClick, onDragLink }) {
@@ -2302,5 +2321,49 @@ function makeStyles() {
       fontWeight: 950,
       cursor: "pointer",
     },
+    depRow2: {
+  display: "grid",
+  gridTemplateColumns: "1fr 90px 90px 80px 80px",
+  gap: 8,
+  alignItems: "center",
+  border: "1px solid #eef2f7",
+  borderRadius: 12,
+  padding: "10px 10px",
+  background: "#fff",
+},
+
+depFromTo: {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  minWidth: 0,
+},
+
+depLine: {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  minWidth: 0,
+},
+
+depTag: {
+  fontSize: 10,
+  fontWeight: 950,
+  padding: "2px 8px",
+  borderRadius: 999,
+  background: "#f1f5f9",
+  border: "1px solid #e5eaf0",
+  color: "#334155",
+  flex: "0 0 auto",
+},
+
+depText: {
+  fontWeight: 900,
+  color: "#0f172a",
+  whiteSpace: "normal",     // ✅ allow wrap
+  overflow: "visible",
+  lineHeight: 1.2,
+},
+
   };
 }
