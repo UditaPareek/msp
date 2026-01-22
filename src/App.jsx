@@ -3,13 +3,15 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite — App.jsx (Gantt with visible dependency connectors + task popup)
+ * MSP Lite — App.jsx (Gantt with dependency connectors + task popup + add dependency)
  *
- * Implemented exactly as requested:
- * 1) Gantt shows dependency connections (arrows) using tolerant pred/succ parsing (same as backend table logic).
- * 2) Clicking a task bar opens popup with predecessors + successors.
- * 3) New Project modal: NO template selector, NO template name shown anywhere.
- *    - UI uses fixed template internally (Template 1 = Solar EPC Master v1).
+ * Fixes included:
+ * 1) Gantt dependency connectors are guaranteed visible (SVG sits ABOVE rows via zIndex).
+ * 2) Connector direction is explicit: Predecessor -> Successor (from pred anchor to succ anchor).
+ * 3) Task bar click opens popup showing predecessors + successors.
+ * 4) Add Dependency UI added (calls POST /addDependency).
+ * 5) New Project modal does NOT show template name/selector; template is applied silently (Solar EPC Master v1).
+ * 6) Dashboard Gantt Preview header clutter reduced (more width + wider tick step in preview).
  */
 
 const TABS = [
@@ -20,8 +22,6 @@ const TABS = [
 ];
 
 const BUFFER_DAYS_FIXED = 30;
-
-// Internal fixed template (Template 1). DO NOT SHOW IN UI.
 const FIXED_TEMPLATE_NAME = "Solar EPC Master v1";
 
 const MILESTONE_FIELDS = [
@@ -74,6 +74,8 @@ export default function App() {
   const project = schedule?.project ?? null;
 
   /* -------------------- dependency field tolerance -------------------- */
+  // Your getDependencies returns:
+  // TaskDependencyId, ProjectId, PredecessorTaskId, SuccessorTaskId, LinkType, LagDays
   const getPredId = (d) =>
     d.PredecessorTaskId ??
     d.PredecessorTaskID ??
@@ -82,11 +84,7 @@ export default function App() {
     d.PredecessorId ??
     d.predecessorId ??
     d.predTaskId ??
-    d.predId ??
-    d.FromTaskId ??
-    d.fromTaskId ??
-    d.FromTaskID ??
-    d.fromTaskID;
+    d.predId;
 
   const getSuccId = (d) =>
     d.SuccessorTaskId ??
@@ -96,11 +94,7 @@ export default function App() {
     d.SuccessorId ??
     d.successorId ??
     d.succTaskId ??
-    d.succId ??
-    d.ToTaskId ??
-    d.toTaskId ??
-    d.ToTaskID ??
-    d.toTaskID;
+    d.succId;
 
   const getDepId = (d) => {
     const raw =
@@ -171,6 +165,7 @@ export default function App() {
 
   /* -------------------- deps maps for popup -------------------- */
   const depPairs = useMemo(() => {
+    // normalize deps into (predId, succId, type, lag, depId)
     const out = [];
     for (const d of deps || []) {
       const pred = normId(getPredId(d));
@@ -257,9 +252,7 @@ export default function App() {
     try {
       const bust = Date.now();
       const [sch, dep] = await Promise.all([
-        fetchJson(
-          `${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`
-        ),
+        fetchJson(`${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`),
         fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(nextProjectId)}&t=${bust}`),
       ]);
 
@@ -357,6 +350,21 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
   }
 
+  async function addDependencyApi({ projectId, predecessorTaskId, successorTaskId, lagDays = 0 }) {
+    const { res, json } = await fetchJson(`${API_BASE}/addDependency?t=${Date.now()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId,
+        predecessorTaskId,
+        successorTaskId,
+        lagDays,
+      }),
+    });
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
+    return json;
+  }
+
   async function createProject(payload) {
     const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
       method: "POST",
@@ -433,7 +441,7 @@ export default function App() {
             style={s.btnPrimary}
             onClick={() => setShowNewProject(true)}
             disabled={loading}
-            title="Create a new project"
+            title="Create a new project from template"
           >
             + New Project
           </button>
@@ -518,12 +526,13 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 14, marginTop: 14 }}>
+            {/* IMPORTANT: give Gantt more width and shrink critical list panel */}
+            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.4fr", gap: 14, marginTop: 14 }}>
               <div style={s.card}>
                 <div style={s.cardHeader}>
                   <div>
                     <div style={s.cardTitle}>Gantt Preview</div>
-                    <div style={s.cardSub}>Includes dependency connectors. Click a bar for predecessors/successors.</div>
+                    <div style={s.cardSub}>Dependency connectors + arrows. Click a bar for predecessors/successors.</div>
                   </div>
                 </div>
                 {tasks.length && projectStartDate ? (
@@ -533,10 +542,6 @@ export default function App() {
                     startDate={projectStartDate}
                     compact
                     onTaskClick={(id) => setSelectedTaskId(id)}
-                    getPredId={getPredId}
-                    getSuccId={getSuccId}
-                    getType={getType}
-                    getLag={getLag}
                   />
                 ) : (
                   <EmptyState text="Load a project (and LOI) to see a date-based Gantt." />
@@ -583,7 +588,7 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Gantt (Target Dates + Connections)</div>
-                <div style={s.cardSub}>Bars represent ES→EF. Lines represent dependencies. Click a bar for details.</div>
+                <div style={s.cardSub}>Bars represent ES→EF. Lines represent Predecessor→Successor. Click a bar for details.</div>
               </div>
             </div>
 
@@ -593,10 +598,6 @@ export default function App() {
                 deps={deps}
                 startDate={projectStartDate}
                 onTaskClick={(id) => setSelectedTaskId(id)}
-                getPredId={getPredId}
-                getSuccId={getSuccId}
-                getType={getType}
-                getLag={getLag}
               />
             ) : (
               <EmptyState text="Load a project (and LOI) to view date-based Gantt." />
@@ -636,10 +637,40 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Task Table (Edit Duration / Dependencies)</div>
-                <div style={s.cardSub}>MSP logic: edit → backend recalculates → UI reload.</div>
+                <div style={s.cardSub}>Edit → backend recalculates → UI reload.</div>
               </div>
+
               <div style={s.cardHeaderRight}>
-                <button style={{ ...s.btnDark, ...(loading ? s.btnDisabled : {}) }} disabled={loading} onClick={() => recalcAndReload(projectId)}>
+                <AddDependencyInline
+                  tasks={tasks}
+                  projectId={project?.ProjectId ?? projectId}
+                  disabled={loading}
+                  onAdd={async ({ predecessorTaskId, successorTaskId, lagDays }) => {
+                    setError("");
+                    setLoading(true);
+                    setBusyMsg("Adding dependency...");
+                    try {
+                      await addDependencyApi({
+                        projectId: project?.ProjectId ?? projectId,
+                        predecessorTaskId,
+                        successorTaskId,
+                        lagDays,
+                      });
+                      await recalcAndReload(project?.ProjectId ?? projectId);
+                    } catch (e) {
+                      setError(e.message || String(e));
+                    } finally {
+                      setBusyMsg("");
+                      setLoading(false);
+                    }
+                  }}
+                />
+
+                <button
+                  style={{ ...s.btnDark, ...(loading ? s.btnDisabled : {}) }}
+                  disabled={loading}
+                  onClick={() => recalcAndReload(projectId)}
+                >
                   Recalculate
                 </button>
               </div>
@@ -702,7 +733,7 @@ export default function App() {
         )}
       </div>
 
-      {/* New Project Modal (NO template shown) */}
+      {/* New Project Modal */}
       {showNewProject && (
         <NewProjectModal
           bufferDays={BUFFER_DAYS_FIXED}
@@ -715,7 +746,7 @@ export default function App() {
             try {
               const out = await createProject({
                 projectName,
-                templateName: FIXED_TEMPLATE_NAME, // fixed Template 1 (not displayed)
+                templateName: FIXED_TEMPLATE_NAME, // APPLY silently, never show in UI
                 bufferDays: BUFFER_DAYS_FIXED,
                 loiDate,
                 commissioningContractDate,
@@ -899,7 +930,7 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
   );
 }
 
-/* -------------------- New Project Modal (NO TEMPLATE SHOWN) -------------------- */
+/* -------------------- New Project Modal (NO TEMPLATE FIELD SHOWN) -------------------- */
 function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
   const s = makeStyles();
 
@@ -932,7 +963,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
           <div>
             <div style={s.modalTitle}>Create New Project</div>
             <div style={s.modalSub}>
-              LOI is project start. Internal commissioning date is derived as Contract - {bufferDays} days.
+              LOI is project start. Internal commissioning = Contract - {bufferDays} days. (Template is applied automatically.)
             </div>
           </div>
           <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
@@ -949,7 +980,6 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
                 disabled={loading}
               />
             </Field>
-            <div />
           </div>
 
           <div style={{ marginTop: 14 }}>
@@ -1015,6 +1045,88 @@ function Field({ label, required, hint, children }) {
       </div>
       {children}
       {hint && <div style={s.fieldHint}>{hint}</div>}
+    </div>
+  );
+}
+
+/* -------------------- Add Dependency Inline (POST /addDependency) -------------------- */
+function AddDependencyInline({ tasks, projectId, disabled, onAdd }) {
+  const s = makeStyles();
+  const [pred, setPred] = useState("");
+  const [succ, setSucc] = useState("");
+  const [lag, setLag] = useState("0");
+
+  const list = (tasks || []).map((t) => ({
+    id: String(t.TaskId),
+    label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
+  }));
+
+  const canSubmit =
+    !disabled &&
+    projectId != null &&
+    pred &&
+    succ &&
+    pred !== succ &&
+    Number.isFinite(parseInt(pred, 10)) &&
+    Number.isFinite(parseInt(succ, 10));
+
+  return (
+    <div style={s.addDepWrap}>
+      <div style={s.addDepTitle}>Add Dependency</div>
+
+      <select
+        value={pred}
+        onChange={(e) => setPred(e.target.value)}
+        disabled={disabled}
+        style={s.addDepSelect}
+        title="Predecessor"
+      >
+        <option value="">Predecessor</option>
+        {list.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.label}
+          </option>
+        ))}
+      </select>
+
+      <select
+        value={succ}
+        onChange={(e) => setSucc(e.target.value)}
+        disabled={disabled}
+        style={s.addDepSelect}
+        title="Successor"
+      >
+        <option value="">Successor</option>
+        {list.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.label}
+          </option>
+        ))}
+      </select>
+
+      <input
+        type="number"
+        value={lag}
+        onChange={(e) => setLag(e.target.value)}
+        disabled={disabled}
+        style={s.addDepLag}
+        title="Lag days"
+      />
+
+      <button
+        style={{ ...s.smallBtnDark, ...(!canSubmit ? s.btnDisabled : {}) }}
+        disabled={!canSubmit}
+        onClick={() =>
+          onAdd({
+            predecessorTaskId: parseInt(pred, 10),
+            successorTaskId: parseInt(succ, 10),
+            lagDays: lag === "" ? 0 : parseInt(lag, 10) || 0,
+          })
+        }
+        title="Create FS dependency"
+      >
+        Add
+      </button>
     </div>
   );
 }
@@ -1212,8 +1324,8 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
   );
 }
 
-/* -------------------- Date-based Gantt WITH VISIBLE CONNECTORS -------------------- */
-function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getPredId, getSuccId, getType, getLag }) {
+/* -------------------- Date-based Gantt WITH CONNECTORS + CLICK -------------------- */
+function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
   const s = makeStyles();
   const normId = (v) => (v == null ? null : String(v));
 
@@ -1227,7 +1339,8 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
 
   if (!valid.length) return null;
 
-  const PX_PER_DAY = compact ? 6 : 10;
+  // Make preview more readable
+  const PX_PER_DAY = compact ? 8 : 10;
   const LEFT_COL_W = compact ? 320 : 420;
   const ROW_H = compact ? 26 : 30;
   const BAR_H = compact ? 10 : 14;
@@ -1240,7 +1353,8 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
   const canvasW = LEFT_COL_W + timelineW;
   const canvasH = HEADER_H + valid.length * ROW_H;
 
-  const tickStep = 7; // weekly
+  // IMPORTANT: reduce tick density in preview to avoid clutter
+  const tickStep = compact ? 14 : 7;
 
   const dayToDate = (dayNo) => {
     const n = Number(dayNo);
@@ -1255,60 +1369,66 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
+  // Build index: TaskId -> row index and bar geometry
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
-      const yTop = HEADER_H + idx * ROW_H;
-      const yMid = yTop + ROW_H / 2;
-
+      const yMid = HEADER_H + idx * ROW_H + ROW_H / 2;
       const xStart = LEFT_COL_W + (t.ES - minStart) * PX_PER_DAY;
       const xEnd = LEFT_COL_W + (t.EF - minStart) * PX_PER_DAY;
-
-      m.set(normId(t.TaskId), { idx, yTop, yMid, xStart, xEnd, t });
+      m.set(normId(t.TaskId), { idx, yMid, xStart, xEnd, t });
     });
     return m;
   }, [valid, HEADER_H, ROW_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
-  // endpoints by link type (so pred vs succ is correct)
-  const pickEndpoints = (predGeom, succGeom, type) => {
-    const T = String(type || "FS").toUpperCase();
-    const predX = T === "SS" || T === "SF" ? predGeom.xStart : predGeom.xEnd;
-    const succX = T === "FF" || T === "SF" ? succGeom.xEnd : succGeom.xStart;
-    return { x1: predX, y1: predGeom.yMid, x2: succX, y2: succGeom.yMid, T };
-  };
-
+  // Normalize deps: Predecessor -> Successor
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
-      const pred = normId(getPredId ? getPredId(d) : d.PredecessorTaskId);
-      const succ = normId(getSuccId ? getSuccId(d) : d.SuccessorTaskId);
+      const pred = normId(
+        d.PredecessorTaskId ??
+        d.predecessorTaskId ??
+        d.PredecessorId ??
+        d.predId ??
+        d.predTaskId
+      );
+      const succ = normId(
+        d.SuccessorTaskId ??
+        d.successorTaskId ??
+        d.SuccessorId ??
+        d.succId ??
+        d.succTaskId
+      );
       if (!pred || !succ) return;
 
-      const gPred = geom.get(pred);
-      const gSucc = geom.get(succ);
-      if (!gPred || !gSucc) return;
+      const from = geom.get(pred);
+      const to = geom.get(succ);
+      if (!from || !to) return;
 
-      const type = getType ? getType(d) : String(d.LinkType ?? d.linkType ?? "FS").toUpperCase();
-      const lag = getLag ? getLag(d) : Number(d.LagDays ?? d.lagDays ?? 0) || 0;
+      const type = String(d.LinkType ?? d.linkType ?? "FS").toUpperCase();
+      const lag = Number(d.LagDays ?? d.lagDays ?? 0) || 0;
 
-      const ep = pickEndpoints(gPred, gSucc, type);
-
-      const lagPx = (Number(lag) || 0) * PX_PER_DAY;
-      const x2Lagged = ep.x2 + lagPx;
-
-      out.push({
-        pred,
-        succ,
-        type: ep.T,
-        lag: Number(lag) || 0,
-        x1: ep.x1,
-        y1: ep.y1,
-        x2: x2Lagged,
-        y2: ep.y2,
-      });
+      out.push({ pred, succ, type, lag, from, to });
     });
     return out;
-  }, [deps, geom, getPredId, getSuccId, getType, getLag, PX_PER_DAY]);
+  }, [deps, geom]);
+
+  // Anchors by link type (visual correctness: FS/SS/FF/SF)
+  const getAnchorX = (g, which) => (which === "start" ? g.xStart : g.xEnd);
+  const resolveAnchors = (e) => {
+    // Default FS
+    let fromWhich = "end";
+    let toWhich = "start";
+    if (e.type === "SS") { fromWhich = "start"; toWhich = "start"; }
+    else if (e.type === "FF") { fromWhich = "end"; toWhich = "end"; }
+    else if (e.type === "SF") { fromWhich = "start"; toWhich = "end"; }
+    return {
+      x1: getAnchorX(e.from, fromWhich),
+      y1: e.from.yMid,
+      x2: getAnchorX(e.to, toWhich),
+      y2: e.to.yMid,
+    };
+  };
 
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
@@ -1348,49 +1468,8 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
             })}
           </div>
 
-          {/* SVG overlay for dependency connectors (visible) */}
-          <svg
-            width={canvasW}
-            height={canvasH}
-            style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 20 }}
-          >
-            <defs>
-              <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
-                <path d="M0,0 L9,3 L0,6 Z" fill="#111" />
-              </marker>
-            </defs>
-
-            {edges.map((e, idx) => {
-              const x1 = e.x1;
-              const y1 = e.y1;
-              const x2 = e.x2;
-              const y2 = e.y2;
-
-              // always draw a clear elbow even if successor point is left of predecessor
-              const elbow = 22;
-              const midX = x2 >= x1 ? x1 + elbow : x1 - elbow;
-              const d = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
-
-              return (
-                <g key={idx}>
-                  <path
-                    d={d}
-                    fill="none"
-                    stroke="#111"
-                    strokeWidth="1.6"
-                    opacity="0.55"
-                    markerEnd="url(#arrowGantt)"
-                  />
-                  <text x={x2 + 6} y={y2 - 6} fontSize="10" fill="#111" opacity="0.75">
-                    {e.type}{e.lag ? `+${e.lag}` : ""}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-
-          {/* rows */}
-          <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 10 }}>
+          {/* ROWS (zIndex lower) */}
+          <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 2 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
               const w = Math.max(1, (t.EF - t.ES) * PX_PER_DAY);
@@ -1433,7 +1512,6 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
                         border: "1px solid rgba(15,23,42,0.15)",
                         cursor: "pointer",
                         padding: 0,
-                        zIndex: 5,
                       }}
                       title="Click to view predecessors/successors"
                     />
@@ -1442,12 +1520,57 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getP
               );
             })}
           </div>
+
+          {/* SVG overlay for dependency connectors (MUST be ABOVE rows) */}
+          <svg
+            width={canvasW}
+            height={canvasH}
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              pointerEvents: "none",
+              zIndex: 6, // KEY FIX: ensure visible above rows
+            }}
+          >
+            <defs>
+              <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <path d="M0,0 L9,3 L0,6 Z" fill="#111" />
+              </marker>
+            </defs>
+
+            {edges.map((e, idx) => {
+              const { x1, y1, x2, y2 } = resolveAnchors(e);
+
+              // Orthogonal routing:
+              // - Step out from x1
+              // - Vertical align to y2
+              // - Step into x2
+              const dir = x2 >= x1 ? 1 : -1;
+              const gap = 14;
+              const midX = x1 + dir * gap;
+
+              const d = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
+
+              return (
+                <path
+                  key={idx}
+                  d={d}
+                  fill="none"
+                  stroke="#111"
+                  strokeWidth="1.4"
+                  opacity="0.55"
+                  markerEnd="url(#arrowGantt)"
+                />
+              );
+            })}
+          </svg>
         </div>
       </div>
 
       {!compact && (
         <div style={s.note}>
-          Tick step is weekly to avoid clutter. If you want monthly ticks, change <code>tickStep</code> to 30.
+          Tick step is weekly in full Gantt. Preview uses 14-day ticks to reduce clutter.
         </div>
       )}
     </div>
@@ -1733,7 +1856,7 @@ function makeStyles() {
       gap: 10,
       flexWrap: "wrap",
     },
-    cardHeaderRight: { display: "flex", gap: 10, alignItems: "center" },
+    cardHeaderRight: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
     cardTitle: { fontWeight: 950, fontSize: 16 },
     cardSub: { fontSize: 12, color: sub, fontWeight: 800 },
 
@@ -1916,8 +2039,36 @@ function makeStyles() {
     relRowMain: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
     relRowMeta: { fontSize: 12, color: sub, fontWeight: 900, whiteSpace: "nowrap" },
 
-    // section titles (used in modal)
-    sectionTitle: { fontWeight: 950, marginBottom: 4 },
-    sectionSub: { fontSize: 12, color: sub, fontWeight: 800 },
+    // Add Dependency UI
+    addDepWrap: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      flexWrap: "wrap",
+      padding: "8px 10px",
+      border: "1px solid #e5eaf0",
+      borderRadius: 12,
+      background: "#fff",
+    },
+    addDepTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginRight: 4 },
+    addDepSelect: {
+      width: 220,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: "1px solid #e5eaf0",
+      background: "#fff",
+      outline: "none",
+    },
+    addDepLag: {
+      width: 70,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: "1px solid #e5eaf0",
+      outline: "none",
+    },
+
+    // missing in your snippet but referenced
+    sectionTitle: { fontWeight: 950, fontSize: 14 },
+    sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
   };
 }
