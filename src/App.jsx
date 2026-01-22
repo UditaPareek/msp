@@ -1289,7 +1289,7 @@ function PerTaskDependencies({
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Existing dependencies list */}
       <div style={s.depListBox}>
-        <div style={s.depListTitle}>Existing Dependencies</div>
+        <div style={s.depListTitle}>Predecessors</div>
 
         {existing.length === 0 ? (
           <div style={s.muted}>No dependencies for this task.</div>
@@ -1388,14 +1388,9 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
     <div style={s.depRow2}>
       <div style={s.depFromTo}>
         <div style={s.depLine} title={fromLabel}>
-          <span style={s.depTag}>FROM</span>
           <span style={s.depText}>{fromLabel}</span>
         </div>
-        <div style={s.depLine} title={toLabel}>
-          <span style={s.depTag}>TO</span>
-          <span style={s.depText}>{toLabel}</span>
-        </div>
-
+      
         {!hasId && (
           <div style={s.depInlineWarn}>
             Missing TaskDependencyId from API. Update/Delete disabled.
@@ -2342,7 +2337,7 @@ depFromTo: {
 depLine: {
   display: "flex",
   alignItems: "flex-start",
-  gap: 8,
+  gap: 0,
   minWidth: 0,
 },
 
