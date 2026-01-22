@@ -1,17 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite — App.jsx (Gantt with dependency connectors + task popup + add dependency)
+ * MSP Lite — App.jsx
  *
- * Fixes included:
- * 1) Gantt dependency connectors are guaranteed visible (SVG sits ABOVE rows via zIndex).
- * 2) Connector direction is explicit: Predecessor -> Successor (from pred anchor to succ anchor).
- * 3) Task bar click opens popup showing predecessors + successors.
- * 4) Add Dependency UI added (calls POST /addDependency).
- * 5) New Project modal does NOT show template name/selector; template is applied silently (Solar EPC Master v1).
- * 6) Dashboard Gantt Preview header clutter reduced (more width + wider tick step in preview).
+ * Implemented (as per your requirement):
+ * 1) Task Table: ONLY per-task "Add Dependency" (task + link type + lag). No big dependency cards.
+ * 2) Circular dependency prevention (UI-level DFS check) before POST /addDependency.
+ * 3) Drag-to-link in Gantt (drag bar -> drop on another bar) creates FS+0 by default.
+ * 4) New Project modal: template hidden (uses fixed template name silently).
+ * 5) Gantt connectors stay visible (SVG above rows).
  */
 
 const TABS = [
@@ -36,6 +35,60 @@ const MILESTONE_FIELDS = [
   { key: "COMM_CONTRACT", label: "Commissioning (as per Contract)", required: true },
 ];
 
+/* =========================================================
+   Graph utilities (cycle prevention + duplicate prevention)
+   ========================================================= */
+function normalizeId(v) {
+  return v == null ? null : String(v);
+}
+
+function buildAdjacency(depPairs) {
+  const adj = new Map();
+  for (const e of depPairs) {
+    const p = normalizeId(e.predId);
+    const s = normalizeId(e.succId);
+    if (!p || !s) continue;
+    if (!adj.has(p)) adj.set(p, []);
+    adj.get(p).push(s);
+  }
+  return adj;
+}
+
+// returns true if adding edge pred->succ would create a cycle
+function wouldCreateCycle(depPairs, predId, succId) {
+  const P = normalizeId(predId);
+  const S = normalizeId(succId);
+  if (!P || !S) return true;
+  if (P === S) return true;
+
+  const adj = buildAdjacency(depPairs);
+
+  // add the proposed edge
+  if (!adj.has(P)) adj.set(P, []);
+  adj.get(P).push(S);
+
+  // cycle exists iff S can reach P
+  const seen = new Set();
+  function dfs(n) {
+    if (n === P) return true;
+    if (seen.has(n)) return false;
+    seen.add(n);
+    const nx = adj.get(n) || [];
+    for (const k of nx) if (dfs(k)) return true;
+    return false;
+  }
+  return dfs(S);
+}
+
+function isDuplicateEdge(depPairs, predId, succId) {
+  const P = normalizeId(predId);
+  const S = normalizeId(succId);
+  return depPairs.some((e) => normalizeId(e.predId) === P && normalizeId(e.succId) === S);
+}
+
+/* =========================================================
+   APP
+   ========================================================= */
 export default function App() {
   const s = useMemo(() => makeStyles(), []);
 
@@ -51,12 +104,10 @@ export default function App() {
 
   const [showNewProject, setShowNewProject] = useState(false);
 
-  // Gantt task popup
+  // Task popup (from click)
   const [selectedTaskId, setSelectedTaskId] = useState(null);
 
   /* -------------------- tolerant parsing -------------------- */
-  const normId = (v) => (v == null ? null : String(v));
-
   const tasks =
     schedule?.tasks ??
     schedule?.project?.tasks ??
@@ -74,7 +125,7 @@ export default function App() {
   const project = schedule?.project ?? null;
 
   /* -------------------- dependency field tolerance -------------------- */
-  // Your getDependencies returns:
+  // getDependencies returns:
   // TaskDependencyId, ProjectId, PredecessorTaskId, SuccessorTaskId, LinkType, LagDays
   const getPredId = (d) =>
     d.PredecessorTaskId ??
@@ -117,59 +168,12 @@ export default function App() {
     return Number.isFinite(n) ? n : 0;
   };
 
-  /* -------------------- date model (LOI = project start) -------------------- */
-  const projectStartDate = useMemo(() => {
-    const direct = parseISO(project?.projectStartDate);
-    if (direct) return direct;
-
-    if (project?.milestones && typeof project.milestones === "object") {
-      const m = project.milestones;
-      const loi = parseISO(m.LOI || m.loi || m.loiDate);
-      if (loi) return loi;
-    }
-
-    if (Array.isArray(project?.Milestones)) {
-      const loiRow = project.Milestones.find((x) => String(x?.Key || x?.key) === "LOI");
-      const loi = parseISO(loiRow?.Date || loiRow?.date || loiRow?.Value || loiRow?.value);
-      if (loi) return loi;
-    }
-
-    return null;
-  }, [project?.projectStartDate, project?.milestones, project?.Milestones]);
-
-  const needsStartDate = tasks.length > 0 && !projectStartDate;
-
-  const dayToDate = (dayNo) => {
-    if (!projectStartDate) return null;
-    const n = Number(dayNo);
-    if (!Number.isFinite(n)) return null;
-    const d = new Date(projectStartDate.getTime());
-    d.setDate(d.getDate() + n);
-    return d;
-  };
-
-  const fmtDDMMMYY = (d) => {
-    if (!(d instanceof Date) || isNaN(d.getTime())) return "";
-    return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
-  };
-
-  const criticalCount = useMemo(() => {
-    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
-  }, [tasks]);
-
-  const taskById = useMemo(() => {
-    const m = new Map();
-    for (const t of tasks || []) m.set(normId(t.TaskId), t);
-    return m;
-  }, [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  /* -------------------- deps maps for popup -------------------- */
+  /* -------------------- normalized dependencies -------------------- */
   const depPairs = useMemo(() => {
-    // normalize deps into (predId, succId, type, lag, depId)
     const out = [];
     for (const d of deps || []) {
-      const pred = normId(getPredId(d));
-      const succ = normId(getSuccId(d));
+      const pred = normalizeId(getPredId(d));
+      const succ = normalizeId(getSuccId(d));
       if (!pred || !succ) continue;
       out.push({
         depId: getDepId(d),
@@ -183,6 +187,13 @@ export default function App() {
     return out;
   }, [deps]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const taskById = useMemo(() => {
+    const m = new Map();
+    for (const t of tasks || []) m.set(normalizeId(t.TaskId), t);
+    return m;
+  }, [tasks]);
+
+  /* -------------------- deps maps for popup -------------------- */
   const predecessorsByTask = useMemo(() => {
     const m = new Map();
     for (const e of depPairs) {
@@ -203,21 +214,49 @@ export default function App() {
     return m;
   }, [depPairs]);
 
-  const selectedTask = selectedTaskId ? taskById.get(normId(selectedTaskId)) : null;
-  const selectedPreds = selectedTaskId ? (predecessorsByTask.get(normId(selectedTaskId)) || []) : [];
-  const selectedSuccs = selectedTaskId ? (successorsByTask.get(normId(selectedTaskId)) || []) : [];
+  const selectedTask = selectedTaskId ? taskById.get(normalizeId(selectedTaskId)) : null;
+  const selectedPreds = selectedTaskId ? (predecessorsByTask.get(normalizeId(selectedTaskId)) || []) : [];
+  const selectedSuccs = selectedTaskId ? (successorsByTask.get(normalizeId(selectedTaskId)) || []) : [];
 
-  const depsBySuccessor = useMemo(() => {
-    const m = new Map();
-    (deps || []).forEach((d) => {
-      const succ = normId(getSuccId(d));
-      if (!succ) return;
-      const arr = m.get(succ) || [];
-      arr.push({ ...d, __id: getDepId(d) });
-      m.set(succ, arr);
-    });
-    return m;
-  }, [deps]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* -------------------- date model (LOI = project start) -------------------- */
+  const projectStartDate = useMemo(() => {
+    const direct = parseISO(project?.projectStartDate);
+    if (direct) return direct;
+
+    if (project?.milestones && typeof project.milestones === "object") {
+      const m = project.milestones;
+      const loi = parseISO(m.LOI || m.loi || m.loiDate);
+      if (loi) return loi;
+    }
+
+    if (Array.isArray(project?.Milestones)) {
+      const loiRow = project.Milestones.find((x) => String(x?.Key || x?.key) === "LOI");
+      const loi = parseISO(loiRow?.Date || loiRow?.date || loiRow?.Value || loiRow?.value);
+      if (loi) return loi;
+    }
+
+    return null;
+  }, [project?.projectStartDate, project?.milestones, project?.Milestones]);
+
+  const dayToDate = (dayNo) => {
+    if (!projectStartDate) return null;
+    const n = Number(dayNo);
+    if (!Number.isFinite(n)) return null;
+    const d = new Date(projectStartDate.getTime());
+    d.setDate(d.getDate() + n);
+    return d;
+  };
+
+  const fmtDDMMMYY = (d) => {
+    if (!(d instanceof Date) || isNaN(d.getTime())) return "";
+    return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
+  };
+
+  const criticalCount = useMemo(() => {
+    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length;
+  }, [tasks]);
+
+  const needsStartDate = tasks.length > 0 && !projectStartDate;
 
   /* -------------------- fetch helpers -------------------- */
   async function safeJson(res) {
@@ -315,42 +354,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Duration update failed");
   }
 
-  async function updateDependency(taskDependencyId, linkType, lagDays) {
-    const idNum = Number(taskDependencyId);
-    if (!Number.isFinite(idNum)) throw new Error("Invalid TaskDependencyId (API is not returning it).");
-
-    const type = String(linkType || "FS").toUpperCase();
-    const lagNum = Number.isFinite(Number(lagDays)) ? Number(lagDays) : 0;
-
-    const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        taskDependencyId: idNum,
-        linkType: type,
-        lagDays: lagNum,
-        LinkType: type,
-        LagDays: lagNum,
-      }),
-    });
-
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Dependency update failed");
-  }
-
-  async function deleteDependency(taskDependencyId) {
-    const idNum = Number(taskDependencyId);
-    if (!Number.isFinite(idNum)) throw new Error("Invalid TaskDependencyId.");
-
-    const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ taskDependencyId: idNum }),
-    });
-
-    if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
-  }
-
-  async function addDependencyApi({ projectId, predecessorTaskId, successorTaskId, lagDays = 0 }) {
+  async function addDependencyApi({ projectId, predecessorTaskId, successorTaskId, linkType = "FS", lagDays = 0 }) {
     const { res, json } = await fetchJson(`${API_BASE}/addDependency?t=${Date.now()}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -358,6 +362,7 @@ export default function App() {
         projectId,
         predecessorTaskId,
         successorTaskId,
+        linkType, // backend may ignore (your sample hardcodes FS) but keep sending
         lagDays,
       }),
     });
@@ -397,6 +402,43 @@ export default function App() {
       finishDate,
     };
   }, [tasks, version?.projectFinishDay, criticalCount, projectStartDate]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* -------------------- Unified Add Dependency handler (cycle + dup check) -------------------- */
+  async function addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays }) {
+    const pid = project?.ProjectId ?? projectId;
+
+    // basic
+    if (!pid) throw new Error("Missing projectId");
+    if (!predecessorTaskId || !successorTaskId) throw new Error("Predecessor and successor are required");
+    if (String(predecessorTaskId) === String(successorTaskId)) throw new Error("A task cannot depend on itself");
+
+    // duplicate
+    if (isDuplicateEdge(depPairs, predecessorTaskId, successorTaskId)) {
+      throw new Error("Dependency already exists (duplicate blocked)");
+    }
+
+    // cycle
+    if (wouldCreateCycle(depPairs, predecessorTaskId, successorTaskId)) {
+      throw new Error("Circular dependency detected. Operation blocked.");
+    }
+
+    setError("");
+    setLoading(true);
+    setBusyMsg("Adding dependency...");
+    try {
+      await addDependencyApi({
+        projectId: pid,
+        predecessorTaskId,
+        successorTaskId,
+        linkType: String(linkType || "FS").toUpperCase(),
+        lagDays: Number.isFinite(Number(lagDays)) ? Number(lagDays) : 0,
+      });
+      await recalcAndReload(pid);
+    } finally {
+      setBusyMsg("");
+      setLoading(false);
+    }
+  }
 
   return (
     <div style={s.page}>
@@ -526,22 +568,28 @@ export default function App() {
               </div>
             </div>
 
-            {/* IMPORTANT: give Gantt more width and shrink critical list panel */}
             <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.4fr", gap: 14, marginTop: 14 }}>
               <div style={s.card}>
                 <div style={s.cardHeader}>
                   <div>
                     <div style={s.cardTitle}>Gantt Preview</div>
-                    <div style={s.cardSub}>Dependency connectors + arrows. Click a bar for predecessors/successors.</div>
+                    <div style={s.cardSub}>
+                      Connectors + arrows. Click bar for preds/succs. Drag bar → bar to add FS link.
+                    </div>
                   </div>
                 </div>
                 {tasks.length && projectStartDate ? (
                   <GanttDates
                     tasks={tasks}
                     deps={deps}
+                    depPairs={depPairs}
                     startDate={projectStartDate}
                     compact
                     onTaskClick={(id) => setSelectedTaskId(id)}
+                    onDragLink={(predId, succId) =>
+                      addDependencyGuarded({ predecessorTaskId: predId, successorTaskId: succId, linkType: "FS", lagDays: 0 })
+                        .catch((e) => setError(e.message || String(e)))
+                    }
                   />
                 ) : (
                   <EmptyState text="Load a project (and LOI) to see a date-based Gantt." />
@@ -562,7 +610,7 @@ export default function App() {
                       .filter((t) => t.IsCritical === 1 || t.IsCritical === true)
                       .slice(0, 12)
                       .map((t) => (
-                        <div key={normId(t.TaskId)} style={s.listRow}>
+                        <div key={normalizeId(t.TaskId)} style={s.listRow}>
                           <div style={{ fontWeight: 950 }}>{t.TaskName}</div>
                           <div style={s.listMeta}>
                             {t.Workstream} • Start {fmtDDMMMYY(dayToDate(t.ES))} • Finish {fmtDDMMMYY(dayToDate(t.EF))}
@@ -588,7 +636,9 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Gantt (Target Dates + Connections)</div>
-                <div style={s.cardSub}>Bars represent ES→EF. Lines represent Predecessor→Successor. Click a bar for details.</div>
+                <div style={s.cardSub}>
+                  Drag-to-link enabled: drag bar → bar to add FS link (lag 0). Click bar for preds/succs.
+                </div>
               </div>
             </div>
 
@@ -596,8 +646,13 @@ export default function App() {
               <GanttDates
                 tasks={tasks}
                 deps={deps}
+                depPairs={depPairs}
                 startDate={projectStartDate}
                 onTaskClick={(id) => setSelectedTaskId(id)}
+                onDragLink={(predId, succId) =>
+                  addDependencyGuarded({ predecessorTaskId: predId, successorTaskId: succId, linkType: "FS", lagDays: 0 })
+                    .catch((e) => setError(e.message || String(e)))
+                }
               />
             ) : (
               <EmptyState text="Load a project (and LOI) to view date-based Gantt." />
@@ -636,36 +691,13 @@ export default function App() {
           <div style={s.card}>
             <div style={s.cardHeader}>
               <div>
-                <div style={s.cardTitle}>Task Table (Edit Duration / Dependencies)</div>
-                <div style={s.cardSub}>Edit → backend recalculates → UI reload.</div>
+                <div style={s.cardTitle}>Task Table (Edit Duration / Add Dependencies)</div>
+                <div style={s.cardSub}>
+                  Per task: choose predecessor + link type + lag, then Add. (Circular + duplicate blocked)
+                </div>
               </div>
 
               <div style={s.cardHeaderRight}>
-                <AddDependencyInline
-                  tasks={tasks}
-                  projectId={project?.ProjectId ?? projectId}
-                  disabled={loading}
-                  onAdd={async ({ predecessorTaskId, successorTaskId, lagDays }) => {
-                    setError("");
-                    setLoading(true);
-                    setBusyMsg("Adding dependency...");
-                    try {
-                      await addDependencyApi({
-                        projectId: project?.ProjectId ?? projectId,
-                        predecessorTaskId,
-                        successorTaskId,
-                        lagDays,
-                      });
-                      await recalcAndReload(project?.ProjectId ?? projectId);
-                    } catch (e) {
-                      setError(e.message || String(e));
-                    } finally {
-                      setBusyMsg("");
-                      setLoading(false);
-                    }
-                  }}
-                />
-
                 <button
                   style={{ ...s.btnDark, ...(loading ? s.btnDisabled : {}) }}
                   disabled={loading}
@@ -678,14 +710,10 @@ export default function App() {
 
             <TaskTable
               tasks={tasks}
-              depsBySuccessor={depsBySuccessor}
-              taskById={taskById}
               disabled={loading}
               dayToDate={dayToDate}
               fmtDDMMMYY={fmtDDMMMYY}
-              getPredId={getPredId}
-              getLag={getLag}
-              getType={getType}
+              depPairs={depPairs}
               onSaveDuration={async (taskId, newDur) => {
                 setError("");
                 setLoading(true);
@@ -700,32 +728,11 @@ export default function App() {
                   setLoading(false);
                 }
               }}
-              onUpdateDep={async (depId, type, lag) => {
-                setError("");
-                setLoading(true);
-                setBusyMsg("Updating dependency...");
+              onAddDep={async ({ predecessorTaskId, successorTaskId, linkType, lagDays }) => {
                 try {
-                  await updateDependency(depId, type, lag);
-                  await recalcAndReload(projectId);
+                  await addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays });
                 } catch (e) {
                   setError(e.message || String(e));
-                } finally {
-                  setBusyMsg("");
-                  setLoading(false);
-                }
-              }}
-              onRemoveDep={async (depId) => {
-                setError("");
-                setLoading(true);
-                setBusyMsg("Deleting dependency...");
-                try {
-                  await deleteDependency(depId);
-                  await recalcAndReload(projectId);
-                } catch (e) {
-                  setError(e.message || String(e));
-                } finally {
-                  setBusyMsg("");
-                  setLoading(false);
                 }
               }}
             />
@@ -746,7 +753,7 @@ export default function App() {
             try {
               const out = await createProject({
                 projectName,
-                templateName: FIXED_TEMPLATE_NAME, // APPLY silently, never show in UI
+                templateName: FIXED_TEMPLATE_NAME, // applied silently
                 bufferDays: BUFFER_DAYS_FIXED,
                 loiDate,
                 commissioningContractDate,
@@ -770,7 +777,7 @@ export default function App() {
         />
       )}
 
-      {/* Task Relations Popup (from Gantt click) */}
+      {/* Task Relations Popup */}
       {selectedTask && (
         <TaskRelationsModal
           onClose={() => setSelectedTaskId(null)}
@@ -930,7 +937,7 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
   );
 }
 
-/* -------------------- New Project Modal (NO TEMPLATE FIELD SHOWN) -------------------- */
+/* -------------------- New Project Modal (template hidden) -------------------- */
 function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
   const s = makeStyles();
 
@@ -963,7 +970,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
           <div>
             <div style={s.modalTitle}>Create New Project</div>
             <div style={s.modalSub}>
-              LOI is project start. Internal commissioning = Contract - {bufferDays} days. (Template is applied automatically.)
+              LOI is project start. Internal commissioning = Contract - {bufferDays} days. (Template applied automatically.)
             </div>
           </div>
           <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
@@ -1049,112 +1056,24 @@ function Field({ label, required, hint, children }) {
   );
 }
 
-/* -------------------- Add Dependency Inline (POST /addDependency) -------------------- */
-function AddDependencyInline({ tasks, projectId, disabled, onAdd }) {
-  const s = makeStyles();
-  const [pred, setPred] = useState("");
-  const [succ, setSucc] = useState("");
-  const [lag, setLag] = useState("0");
-
-  const list = (tasks || []).map((t) => ({
-    id: String(t.TaskId),
-    label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
-  }));
-
-  const canSubmit =
-    !disabled &&
-    projectId != null &&
-    pred &&
-    succ &&
-    pred !== succ &&
-    Number.isFinite(parseInt(pred, 10)) &&
-    Number.isFinite(parseInt(succ, 10));
-
-  return (
-    <div style={s.addDepWrap}>
-      <div style={s.addDepTitle}>Add Dependency</div>
-
-      <select
-        value={pred}
-        onChange={(e) => setPred(e.target.value)}
-        disabled={disabled}
-        style={s.addDepSelect}
-        title="Predecessor"
-      >
-        <option value="">Predecessor</option>
-        {list.map((x) => (
-          <option key={x.id} value={x.id}>
-            {x.label}
-          </option>
-        ))}
-      </select>
-
-      <select
-        value={succ}
-        onChange={(e) => setSucc(e.target.value)}
-        disabled={disabled}
-        style={s.addDepSelect}
-        title="Successor"
-      >
-        <option value="">Successor</option>
-        {list.map((x) => (
-          <option key={x.id} value={x.id}>
-            {x.label}
-          </option>
-        ))}
-      </select>
-
-      <input
-        type="number"
-        value={lag}
-        onChange={(e) => setLag(e.target.value)}
-        disabled={disabled}
-        style={s.addDepLag}
-        title="Lag days"
-      />
-
-      <button
-        style={{ ...s.smallBtnDark, ...(!canSubmit ? s.btnDisabled : {}) }}
-        disabled={!canSubmit}
-        onClick={() =>
-          onAdd({
-            predecessorTaskId: parseInt(pred, 10),
-            successorTaskId: parseInt(succ, 10),
-            lagDays: lag === "" ? 0 : parseInt(lag, 10) || 0,
-          })
-        }
-        title="Create FS dependency"
-      >
-        Add
-      </button>
-    </div>
-  );
-}
-
-/* -------------------- Task Table -------------------- */
+/* -------------------- Task Table (per-task Add Dependency only) -------------------- */
 function TaskTable({
   tasks,
-  depsBySuccessor,
-  taskById,
   disabled,
   dayToDate,
   fmtDDMMMYY,
-  getPredId,
-  getLag,
-  getType,
+  depPairs,
   onSaveDuration,
-  onUpdateDep,
-  onRemoveDep,
+  onAddDep,
 }) {
   const s = makeStyles();
-  const normId = (v) => (v == null ? null : String(v));
 
   return (
     <div style={{ padding: 14, overflowX: "auto" }}>
       <table style={s.table}>
         <thead>
           <tr>
-            {["Workstream", "Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Type/Lag)"].map((h) => (
+            {["Workstream", "Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map((h) => (
               <th key={h} style={s.th}>{h}</th>
             ))}
           </tr>
@@ -1163,20 +1082,16 @@ function TaskTable({
         <tbody>
           {(tasks || []).map((t, idx) => (
             <TaskRow
-              key={normId(t.TaskId)}
+              key={normalizeId(t.TaskId)}
               rowIndex={idx}
               task={t}
-              taskById={taskById}
-              depsForTask={depsBySuccessor.get(normId(t.TaskId)) || []}
+              tasks={tasks}
+              depPairs={depPairs}
               disabled={disabled}
               dayToDate={dayToDate}
               fmtDDMMMYY={fmtDDMMMYY}
-              getPredId={getPredId}
-              getLag={getLag}
-              getType={getType}
               onSaveDuration={onSaveDuration}
-              onUpdateDep={onUpdateDep}
-              onRemoveDep={onRemoveDep}
+              onAddDep={onAddDep}
             />
           ))}
 
@@ -1189,7 +1104,7 @@ function TaskTable({
       </table>
 
       <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Durations & links update schedule after recalculation.
+        Dates shown are Target Dates (LOI + ES/EF). Dependencies are added per task row only.
       </div>
     </div>
   );
@@ -1198,22 +1113,18 @@ function TaskTable({
 function TaskRow({
   rowIndex,
   task,
-  taskById,
-  depsForTask,
+  tasks,
+  depPairs,
   disabled,
   dayToDate,
   fmtDDMMMYY,
-  getPredId,
-  getLag,
-  getType,
   onSaveDuration,
-  onUpdateDep,
-  onRemoveDep,
+  onAddDep,
 }) {
   const s = makeStyles();
   const isCrit = task.IsCritical === 1 || task.IsCritical === true;
-  const [dur, setDur] = useState(task.DurationDays ?? "");
 
+  const [dur, setDur] = useState(task.DurationDays ?? "");
   useEffect(() => setDur(task.DurationDays ?? ""), [task.DurationDays]);
 
   const startDt = dayToDate(task.ES);
@@ -1250,84 +1161,118 @@ function TaskRow({
       <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
       <td style={{ ...s.td, minWidth: 520 }}>
-        {depsForTask.length === 0 ? (
-          <span style={{ color: "#64748b" }}>(none)</span>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {depsForTask.map((d) => {
-              const depId = d.__id ?? null;
-              const predIdRaw = getPredId(d);
-              const pred = taskById.get(predIdRaw == null ? null : String(predIdRaw));
-              const predName = pred ? `${pred.Workstream} — ${pred.TaskName}` : `TaskId ${String(predIdRaw ?? "")}`;
-
-              return (
-                <DepEditor
-                  key={String(depId ?? `${predIdRaw}_${Math.random()}`)}
-                  depId={depId}
-                  predName={predName}
-                  initialType={getType(d)}
-                  initialLag={getLag(d)}
-                  disabled={disabled}
-                  onUpdate={onUpdateDep}
-                  onRemove={onRemoveDep}
-                />
-              );
-            })}
-          </div>
-        )}
+        <PerTaskAddDependency
+          tasks={tasks}
+          depPairs={depPairs}
+          successorTaskId={task.TaskId}
+          disabled={disabled}
+          onAdd={(payload) => onAddDep(payload)}
+        />
       </td>
     </tr>
   );
 }
 
-function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdate, onRemove }) {
+function PerTaskAddDependency({ tasks, depPairs, successorTaskId, disabled, onAdd }) {
   const s = makeStyles();
-  const [type, setType] = useState((initialType || "FS").toUpperCase());
-  const [lag, setLag] = useState(String(initialLag ?? 0));
+  const succ = normalizeId(successorTaskId);
 
-  useEffect(() => setType((initialType || "FS").toUpperCase()), [initialType]);
-  useEffect(() => setLag(String(initialLag ?? 0)), [initialLag]);
+  const [pred, setPred] = useState("");
+  const [type, setType] = useState("FS");
+  const [lag, setLag] = useState("0");
 
-  const canEdit = Number.isFinite(Number(depId));
+  const options = (tasks || [])
+    .filter((t) => normalizeId(t.TaskId) !== succ)
+    .map((t) => ({
+      id: normalizeId(t.TaskId),
+      label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
+    }));
+
+  const canSubmit =
+    !disabled &&
+    pred &&
+    normalizeId(pred) !== succ &&
+    !isDuplicateEdge(depPairs, pred, succ) &&
+    !wouldCreateCycle(depPairs, pred, succ);
+
+  const dup = pred && isDuplicateEdge(depPairs, pred, succ);
+  const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
 
   return (
-    <div style={s.depRow}>
-      <div style={s.depName}>{predName}</div>
+    <div style={s.perTaskDepWrap}>
+      <div style={s.perTaskDepTitle}>Add Dependency</div>
 
-      <select value={type} onChange={(e) => setType(e.target.value)} disabled={disabled || !canEdit} style={s.select}>
+      <select
+        value={pred}
+        onChange={(e) => setPred(e.target.value)}
+        disabled={disabled}
+        style={s.addDepSelect}
+        title="Predecessor Task"
+      >
+        <option value="">Predecessor Task</option>
+        {options.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.label}
+          </option>
+        ))}
+      </select>
+
+      <select
+        value={type}
+        onChange={(e) => setType(e.target.value)}
+        disabled={disabled}
+        style={s.typeSelect}
+        title="Link Type"
+      >
         <option value="FS">FS</option>
         <option value="SS">SS</option>
         <option value="FF">FF</option>
         <option value="SF">SF</option>
       </select>
 
-      <input style={s.lagInput} value={lag} onChange={(e) => setLag(e.target.value)} disabled={disabled || !canEdit} type="number" />
+      <input
+        type="number"
+        value={lag}
+        onChange={(e) => setLag(e.target.value)}
+        disabled={disabled}
+        style={s.addDepLag}
+        title="Lag (days)"
+      />
 
       <button
-        style={{ ...s.smallBtnDark, ...(disabled || !canEdit ? s.btnDisabled : {}) }}
-        onClick={() => onUpdate(depId, type, lag === "" ? 0 : Number(lag))}
-        disabled={disabled || !canEdit}
+        style={{ ...s.smallBtnDark, ...(!canSubmit ? s.btnDisabled : {}) }}
+        disabled={!canSubmit}
+        onClick={() => {
+          onAdd({
+            predecessorTaskId: Number(pred),
+            successorTaskId: Number(succ),
+            linkType: type,
+            lagDays: lag === "" ? 0 : Number(lag) || 0,
+          });
+          setPred("");
+          setType("FS");
+          setLag("0");
+        }}
+        title="Add Dependency"
       >
-        Update
+        Add
       </button>
 
-      <button
-        style={{ ...s.smallBtnDanger, ...(disabled || !canEdit ? s.btnDisabled : {}) }}
-        onClick={() => onRemove(depId)}
-        disabled={disabled || !canEdit}
-      >
-        Remove
-      </button>
-
-      {!canEdit && <span style={s.depWarn}>Missing TaskDependencyId from getDependencies</span>}
+      {(dup || cyc) && (
+        <div style={s.depInlineWarn}>
+          {dup ? "Duplicate blocked." : "Cycle blocked."}
+        </div>
+      )}
     </div>
   );
 }
 
-/* -------------------- Date-based Gantt WITH CONNECTORS + CLICK -------------------- */
-function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
+/* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
+function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskClick, onDragLink }) {
   const s = makeStyles();
-  const normId = (v) => (v == null ? null : String(v));
+
+  const containerRef = useRef(null);
+  const [drag, setDrag] = useState(null); // { fromId, x, y, startX, startY }
 
   const valid = (tasks || [])
     .map((t) => ({
@@ -1339,7 +1284,6 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
 
   if (!valid.length) return null;
 
-  // Make preview more readable
   const PX_PER_DAY = compact ? 8 : 10;
   const LEFT_COL_W = compact ? 320 : 420;
   const ROW_H = compact ? 26 : 30;
@@ -1353,7 +1297,6 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
   const canvasW = LEFT_COL_W + timelineW;
   const canvasH = HEADER_H + valid.length * ROW_H;
 
-  // IMPORTANT: reduce tick density in preview to avoid clutter
   const tickStep = compact ? 14 : 7;
 
   const dayToDate = (dayNo) => {
@@ -1369,38 +1312,36 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
-  // Build index: TaskId -> row index and bar geometry
+  // geometry map for hit testing (drop target)
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
-      const yMid = HEADER_H + idx * ROW_H + ROW_H / 2;
+      const rowTop = HEADER_H + idx * ROW_H;
       const xStart = LEFT_COL_W + (t.ES - minStart) * PX_PER_DAY;
       const xEnd = LEFT_COL_W + (t.EF - minStart) * PX_PER_DAY;
-      m.set(normId(t.TaskId), { idx, yMid, xStart, xEnd, t });
+      const barTop = rowTop + (ROW_H - BAR_H) / 2;
+      m.set(normalizeId(t.TaskId), {
+        t,
+        idx,
+        rowTop,
+        rowBottom: rowTop + ROW_H,
+        xStart,
+        xEnd,
+        barTop,
+        barBottom: barTop + BAR_H,
+        yMid: rowTop + ROW_H / 2,
+      });
     });
     return m;
-  }, [valid, HEADER_H, ROW_H, LEFT_COL_W, minStart, PX_PER_DAY]);
+  }, [valid, HEADER_H, ROW_H, BAR_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
-  // Normalize deps: Predecessor -> Successor
+  // normalize edges pred->succ
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
-      const pred = normId(
-        d.PredecessorTaskId ??
-        d.predecessorTaskId ??
-        d.PredecessorId ??
-        d.predId ??
-        d.predTaskId
-      );
-      const succ = normId(
-        d.SuccessorTaskId ??
-        d.successorTaskId ??
-        d.SuccessorId ??
-        d.succId ??
-        d.succTaskId
-      );
+      const pred = normalizeId(getPredFromRaw(d));
+      const succ = normalizeId(getSuccFromRaw(d));
       if (!pred || !succ) return;
-
       const from = geom.get(pred);
       const to = geom.get(succ);
       if (!from || !to) return;
@@ -1413,10 +1354,15 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
     return out;
   }, [deps, geom]);
 
-  // Anchors by link type (visual correctness: FS/SS/FF/SF)
+  function getPredFromRaw(d) {
+    return d.PredecessorTaskId ?? d.predecessorTaskId ?? d.PredecessorId ?? d.predId ?? d.predTaskId;
+  }
+  function getSuccFromRaw(d) {
+    return d.SuccessorTaskId ?? d.successorTaskId ?? d.SuccessorId ?? d.succId ?? d.succTaskId;
+  }
+
   const getAnchorX = (g, which) => (which === "start" ? g.xStart : g.xEnd);
   const resolveAnchors = (e) => {
-    // Default FS
     let fromWhich = "end";
     let toWhich = "start";
     if (e.type === "SS") { fromWhich = "start"; toWhich = "start"; }
@@ -1430,10 +1376,77 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
     };
   };
 
+  function startDrag(fromTaskId, clientX, clientY) {
+    if (!onDragLink) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+
+    setDrag({
+      fromId: normalizeId(fromTaskId),
+      startX: x,
+      startY: y,
+      x,
+      y,
+    });
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function onMove(e) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setDrag((p) => (p ? { ...p, x, y } : p));
+  }
+
+  function findDropTarget(x, y) {
+    // must drop on a bar region (not just row)
+    for (const [id, g] of geom.entries()) {
+      if (x >= g.xStart && x <= g.xEnd && y >= g.barTop && y <= g.barBottom) {
+        return id;
+      }
+    }
+    return null;
+  }
+
+  function onUp(e) {
+    try {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      setDrag((cur) => {
+        if (!cur) return null;
+        const toId = findDropTarget(x, y);
+
+        if (toId && toId !== cur.fromId) {
+          // UI-level quick checks before calling handler (extra safety)
+          if (isDuplicateEdge(depPairs || [], cur.fromId, toId)) return null;
+          if (wouldCreateCycle(depPairs || [], cur.fromId, toId)) return null;
+
+          onDragLink?.(Number(cur.fromId), Number(toId));
+        }
+        return null;
+      });
+    } finally {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+  }
+
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
       <div style={{ overflowX: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
-        <div style={{ position: "relative", width: canvasW, height: canvasH }}>
+        <div
+          ref={containerRef}
+          style={{ position: "relative", width: canvasW, height: canvasH }}
+        >
           {/* left header */}
           <div style={{ position: "absolute", left: 0, top: 0, width: LEFT_COL_W, height: HEADER_H, ...s.ganttHeader }}>
             Task
@@ -1468,7 +1481,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
             })}
           </div>
 
-          {/* ROWS (zIndex lower) */}
+          {/* ROWS */}
           <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 2 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
@@ -1481,7 +1494,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
 
               return (
                 <div
-                  key={normId(t.TaskId)}
+                  key={normalizeId(t.TaskId)}
                   style={{
                     display: "flex",
                     height: ROW_H,
@@ -1501,6 +1514,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
                     <button
                       type="button"
                       onClick={() => onTaskClick && onTaskClick(t.TaskId)}
+                      onMouseDown={(e) => startDrag(t.TaskId, e.clientX, e.clientY)}
                       style={{
                         position: "absolute",
                         left: barLeft,
@@ -1510,10 +1524,10 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
                         borderRadius: 7,
                         background: isCrit ? "#f59e0b" : "#94a3b8",
                         border: "1px solid rgba(15,23,42,0.15)",
-                        cursor: "pointer",
+                        cursor: onDragLink ? "crosshair" : "pointer",
                         padding: 0,
                       }}
-                      title="Click to view predecessors/successors"
+                      title={onDragLink ? "Click for details. Drag to link." : "Click to view predecessors/successors"}
                     />
                   </div>
                 </div>
@@ -1521,7 +1535,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
             })}
           </div>
 
-          {/* SVG overlay for dependency connectors (MUST be ABOVE rows) */}
+          {/* SVG overlay for dependency connectors */}
           <svg
             width={canvasW}
             height={canvasH}
@@ -1530,7 +1544,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
               left: 0,
               top: 0,
               pointerEvents: "none",
-              zIndex: 6, // KEY FIX: ensure visible above rows
+              zIndex: 6,
             }}
           >
             <defs>
@@ -1541,15 +1555,9 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
 
             {edges.map((e, idx) => {
               const { x1, y1, x2, y2 } = resolveAnchors(e);
-
-              // Orthogonal routing:
-              // - Step out from x1
-              // - Vertical align to y2
-              // - Step into x2
               const dir = x2 >= x1 ? 1 : -1;
               const gap = 14;
               const midX = x1 + dir * gap;
-
               const d = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
 
               return (
@@ -1564,13 +1572,27 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
                 />
               );
             })}
+
+            {/* Drag preview line */}
+            {drag && (
+              <>
+                <path
+                  d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
+                  fill="none"
+                  stroke="#0f172a"
+                  strokeWidth="1.8"
+                  opacity="0.65"
+                  markerEnd="url(#arrowGantt)"
+                />
+              </>
+            )}
           </svg>
         </div>
       </div>
 
       {!compact && (
         <div style={s.note}>
-          Tick step is weekly in full Gantt. Preview uses 14-day ticks to reduce clutter.
+          Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.
         </div>
       )}
     </div>
@@ -1906,21 +1928,6 @@ function makeStyles() {
       fontWeight: 950,
       cursor: "pointer",
     },
-    smallBtnDanger: {
-      padding: "6px 10px",
-      borderRadius: 10,
-      border: "1px solid #fecaca",
-      background: "#fef2f2",
-      color: "#991b1b",
-      fontWeight: 950,
-      cursor: "pointer",
-    },
-
-    depRow: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 10px", border: "1px solid #e5eaf0", borderRadius: 12, background: "#fff" },
-    depName: { minWidth: 260, fontWeight: 900 },
-    select: { padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
-    lagInput: { width: 70, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
-    depWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
 
     ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 950, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
 
@@ -2019,7 +2026,6 @@ function makeStyles() {
       background: "#fff",
     },
 
-    // relations modal extra
     relHeaderCard: {
       background: "#f8fafc",
       border: "1px solid #e5eaf0",
@@ -2039,8 +2045,11 @@ function makeStyles() {
     relRowMain: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
     relRowMeta: { fontSize: 12, color: sub, fontWeight: 900, whiteSpace: "nowrap" },
 
-    // Add Dependency UI
-    addDepWrap: {
+    sectionTitle: { fontWeight: 950, fontSize: 14 },
+    sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
+
+    // per-task add dep
+    perTaskDepWrap: {
       display: "flex",
       alignItems: "center",
       gap: 8,
@@ -2050,9 +2059,17 @@ function makeStyles() {
       borderRadius: 12,
       background: "#fff",
     },
-    addDepTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginRight: 4 },
+    perTaskDepTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginRight: 4 },
     addDepSelect: {
-      width: 220,
+      width: 260,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: "1px solid #e5eaf0",
+      background: "#fff",
+      outline: "none",
+    },
+    typeSelect: {
+      width: 80,
       padding: "6px 8px",
       borderRadius: 10,
       border: "1px solid #e5eaf0",
@@ -2060,15 +2077,12 @@ function makeStyles() {
       outline: "none",
     },
     addDepLag: {
-      width: 70,
+      width: 80,
       padding: "6px 8px",
       borderRadius: 10,
       border: "1px solid #e5eaf0",
       outline: "none",
     },
-
-    // missing in your snippet but referenced
-    sectionTitle: { fontWeight: 950, fontSize: 14 },
-    sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
+    depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
   };
 }
