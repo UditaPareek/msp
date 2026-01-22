@@ -369,7 +369,29 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
     return json;
   }
-
+  async function updateDependencyApi({ dependencyId, linkType, lagDays }) {
+    const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dependencyId,
+        linkType: String(linkType || "FS").toUpperCase(),
+        lagDays: Number.isFinite(Number(lagDays)) ? Number(lagDays) : 0,
+      }),
+    });
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Update dependency failed");
+    return json;
+  }
+  
+  async function deleteDependencyApi({ dependencyId }) {
+    const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dependencyId }),
+    });
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
+    return json;
+  }
   async function createProject(payload) {
     const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
       method: "POST",
@@ -733,6 +755,34 @@ export default function App() {
                   await addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays });
                 } catch (e) {
                   setError(e.message || String(e));
+                }
+              }}
+              onUpdateDep={async ({ dependencyId, linkType, lagDays }) => {
+                try {
+                  setError("");
+                  setLoading(true);
+                  setBusyMsg("Updating dependency...");
+                  await updateDependencyApi({ dependencyId, linkType, lagDays });
+                  await recalcAndReload(projectId);
+                } catch (e) {
+                  setError(e.message || String(e));
+                } finally {
+                  setBusyMsg("");
+                  setLoading(false);
+                }
+              }}
+              onDeleteDep={async ({ dependencyId }) => {
+                try {
+                  setError("");
+                  setLoading(true);
+                  setBusyMsg("Deleting dependency...");
+                  await deleteDependencyApi({ dependencyId });
+                  await recalcAndReload(projectId);
+                } catch (e) {
+                  setError(e.message || String(e));
+                } finally {
+                  setBusyMsg("");
+                  setLoading(false);
                 }
               }}
             />
@@ -1161,22 +1211,53 @@ function TaskRow({
       <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
       <td style={{ ...s.td, minWidth: 520 }}>
-        <PerTaskAddDependency
+        <PerTaskDependencies
           tasks={tasks}
           depPairs={depPairs}
           successorTaskId={task.TaskId}
           disabled={disabled}
-          onAdd={(payload) => onAddDep(payload)}
+          onAdd={onAddDep}
+          onUpdateDep={onUpdateDep}
+          onDeleteDep={onDeleteDep}
         />
       </td>
     </tr>
   );
 }
 
-function PerTaskAddDependency({ tasks, depPairs, successorTaskId, disabled, onAdd }) {
+function PerTaskDependencies({
+  tasks,
+  depPairs,
+  successorTaskId,
+  disabled,
+  onAdd,
+  onUpdateDep,
+  onDeleteDep,
+}) {
   const s = makeStyles();
   const succ = normalizeId(successorTaskId);
 
+  const taskLabelById = useMemo(() => {
+    const m = new Map();
+    (tasks || []).forEach((t) => {
+      m.set(normalizeId(t.TaskId), `${t.Workstream || ""} — ${t.TaskName || ""}`.trim());
+    });
+    return m;
+  }, [tasks]);
+
+  // existing deps INTO this successor
+  const existing = useMemo(() => {
+    return (depPairs || [])
+      .filter((e) => normalizeId(e.succId) === succ && Number.isFinite(Number(e.depId)))
+      .map((e) => ({
+        depId: Number(e.depId),
+        predId: normalizeId(e.predId),
+        type: String(e.type || "FS").toUpperCase(),
+        lag: Number(e.lag || 0),
+      }));
+  }, [depPairs, succ]);
+
+  // Add-new controls
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
@@ -1188,7 +1269,7 @@ function PerTaskAddDependency({ tasks, depPairs, successorTaskId, disabled, onAd
       label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
     }));
 
-  const canSubmit =
+  const canAdd =
     !disabled &&
     pred &&
     normalizeId(pred) !== succ &&
@@ -1199,30 +1280,113 @@ function PerTaskAddDependency({ tasks, depPairs, successorTaskId, disabled, onAd
   const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
 
   return (
-    <div style={s.perTaskDepWrap}>
-      <div style={s.perTaskDepTitle}>Add Dependency</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Existing dependencies list */}
+      <div style={s.depListBox}>
+        <div style={s.depListTitle}>Existing Dependencies</div>
 
-      <select
-        value={pred}
-        onChange={(e) => setPred(e.target.value)}
-        disabled={disabled}
-        style={s.addDepSelect}
-        title="Predecessor Task"
-      >
-        <option value="">Predecessor Task</option>
-        {options.map((x) => (
-          <option key={x.id} value={x.id}>
-            {x.label}
-          </option>
-        ))}
-      </select>
+        {existing.length === 0 ? (
+          <div style={s.muted}>No dependencies for this task.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {existing.map((d) => (
+              <DepRow
+                key={d.depId}
+                dep={d}
+                predLabel={taskLabelById.get(d.predId) || `TaskId ${d.predId}`}
+                disabled={disabled}
+                onSave={(next) => onUpdateDep(next)}
+                onDelete={(id) => onDeleteDep({ dependencyId: id })}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Add new dependency */}
+      <div style={s.perTaskDepWrap}>
+        <div style={s.perTaskDepTitle}>Add Dependency</div>
+
+        <select
+          value={pred}
+          onChange={(e) => setPred(e.target.value)}
+          disabled={disabled}
+          style={s.addDepSelect}
+        >
+          <option value="">Predecessor Task</option>
+          {options.map((x) => (
+            <option key={x.id} value={x.id}>
+              {x.label}
+            </option>
+          ))}
+        </select>
+
+        <select value={type} onChange={(e) => setType(e.target.value)} disabled={disabled} style={s.typeSelect}>
+          <option value="FS">FS</option>
+          <option value="SS">SS</option>
+          <option value="FF">FF</option>
+          <option value="SF">SF</option>
+        </select>
+
+        <input
+          type="number"
+          value={lag}
+          onChange={(e) => setLag(e.target.value)}
+          disabled={disabled}
+          style={s.addDepLag}
+          title="Lag (days)"
+        />
+
+        <button
+          style={{ ...s.smallBtnDark, ...(!canAdd ? s.btnDisabled : {}) }}
+          disabled={!canAdd}
+          onClick={() => {
+            onAdd({
+              predecessorTaskId: Number(pred),
+              successorTaskId: Number(succ),
+              linkType: type,
+              lagDays: lag === "" ? 0 : Number(lag) || 0,
+            });
+            setPred("");
+            setType("FS");
+            setLag("0");
+          }}
+        >
+          Add
+        </button>
+
+        {(dup || cyc) && <div style={s.depInlineWarn}>{dup ? "Duplicate blocked." : "Cycle blocked."}</div>}
+      </div>
+    </div>
+  );
+}
+
+function DepRow({ dep, predLabel, disabled, onSave, onDelete }) {
+  const s = makeStyles();
+  const [type, setType] = useState(dep.type || "FS");
+  const [lag, setLag] = useState(String(dep.lag ?? 0));
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setType(dep.type || "FS");
+    setLag(String(dep.lag ?? 0));
+    setDirty(false);
+  }, [dep.depId, dep.type, dep.lag]);
+
+  const canSave = !disabled && dirty;
+
+  return (
+    <div style={s.depRow}>
+      <div style={s.depPred} title={predLabel}>{predLabel}</div>
 
       <select
         value={type}
-        onChange={(e) => setType(e.target.value)}
         disabled={disabled}
-        style={s.typeSelect}
-        title="Link Type"
+        onChange={(e) => {
+          setType(e.target.value);
+          setDirty(true);
+        }}
+        style={s.typeSelectSmall}
       >
         <option value="FS">FS</option>
         <option value="SS">SS</option>
@@ -1233,36 +1397,36 @@ function PerTaskAddDependency({ tasks, depPairs, successorTaskId, disabled, onAd
       <input
         type="number"
         value={lag}
-        onChange={(e) => setLag(e.target.value)}
         disabled={disabled}
-        style={s.addDepLag}
+        onChange={(e) => {
+          setLag(e.target.value);
+          setDirty(true);
+        }}
+        style={s.addDepLagSmall}
         title="Lag (days)"
       />
 
       <button
-        style={{ ...s.smallBtnDark, ...(!canSubmit ? s.btnDisabled : {}) }}
-        disabled={!canSubmit}
-        onClick={() => {
-          onAdd({
-            predecessorTaskId: Number(pred),
-            successorTaskId: Number(succ),
+        style={{ ...s.smallBtnDark, ...(!canSave ? s.btnDisabled : {}) }}
+        disabled={!canSave}
+        onClick={() =>
+          onSave({
+            dependencyId: dep.depId,
             linkType: type,
             lagDays: lag === "" ? 0 : Number(lag) || 0,
-          });
-          setPred("");
-          setType("FS");
-          setLag("0");
-        }}
-        title="Add Dependency"
+          })
+        }
       >
-        Add
+        Save
       </button>
 
-      {(dup || cyc) && (
-        <div style={s.depInlineWarn}>
-          {dup ? "Duplicate blocked." : "Cycle blocked."}
-        </div>
-      )}
+      <button
+        style={s.smallBtnDanger}
+        disabled={disabled}
+        onClick={() => onDelete(dep.depId)}
+      >
+        Delete
+      </button>
     </div>
   );
 }
@@ -2084,5 +2248,53 @@ function makeStyles() {
       outline: "none",
     },
     depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
+    depListBox: {
+      border: "1px solid #e5eaf0",
+      borderRadius: 12,
+      padding: 10,
+      background: "#fff",
+    },
+    depListTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginBottom: 8 },
+    
+    depRow: {
+      display: "grid",
+      gridTemplateColumns: "1fr 90px 90px 80px 80px",
+      gap: 8,
+      alignItems: "center",
+      border: "1px solid #eef2f7",
+      borderRadius: 12,
+      padding: "8px 10px",
+      background: "#fff",
+    },
+    depPred: {
+      fontWeight: 900,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+    },
+    typeSelectSmall: {
+      width: 90,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: "1px solid #e5eaf0",
+      background: "#fff",
+      outline: "none",
+    },
+    addDepLagSmall: {
+      width: 90,
+      padding: "6px 8px",
+      borderRadius: 10,
+      border: "1px solid #e5eaf0",
+      outline: "none",
+    },
+    smallBtnDanger: {
+      padding: "6px 10px",
+      borderRadius: 10,
+      border: "1px solid #b91c1c",
+      background: "#b91c1c",
+      color: "#fff",
+      fontWeight: 950,
+      cursor: "pointer",
+    },
   };
 }
