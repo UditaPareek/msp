@@ -1115,6 +1115,8 @@ function TaskTable({
   depPairs,
   onSaveDuration,
   onAddDep,
+  onUpdateDep,
+  onDeleteDep,
 }) {
   const s = makeStyles();
 
@@ -1142,6 +1144,8 @@ function TaskTable({
               fmtDDMMMYY={fmtDDMMMYY}
               onSaveDuration={onSaveDuration}
               onAddDep={onAddDep}
+              onUpdateDep={onUpdateDep}
+              onDeleteDep={onDeleteDep}
             />
           ))}
 
@@ -1170,6 +1174,8 @@ function TaskRow({
   fmtDDMMMYY,
   onSaveDuration,
   onAddDep,
+  onUpdateDep,
+  onDeleteDep,
 }) {
   const s = makeStyles();
   const isCrit = task.IsCritical === 1 || task.IsCritical === true;
