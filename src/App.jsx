@@ -3,12 +3,13 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite — App.jsx (Gantt with dependency connectors + task popup)
+ * MSP Lite — App.jsx (Gantt with visible dependency connectors + task popup)
  *
- * Changes implemented:
- * 1) Gantt shows dependency connections (lines with arrows) using deps already loaded.
+ * Implemented exactly as requested:
+ * 1) Gantt shows dependency connections (arrows) using tolerant pred/succ parsing (same as backend table logic).
  * 2) Clicking a task bar opens popup with predecessors + successors.
- * 3) New Project modal does NOT show template selector; always uses Solar EPC Master v1.
+ * 3) New Project modal: NO template selector, NO template name shown anywhere.
+ *    - UI uses fixed template internally (Template 1 = Solar EPC Master v1).
  */
 
 const TABS = [
@@ -20,7 +21,7 @@ const TABS = [
 
 const BUFFER_DAYS_FIXED = 30;
 
-// Fixed template name (per your requirement)
+// Internal fixed template (Template 1). DO NOT SHOW IN UI.
 const FIXED_TEMPLATE_NAME = "Solar EPC Master v1";
 
 const MILESTONE_FIELDS = [
@@ -81,7 +82,11 @@ export default function App() {
     d.PredecessorId ??
     d.predecessorId ??
     d.predTaskId ??
-    d.predId;
+    d.predId ??
+    d.FromTaskId ??
+    d.fromTaskId ??
+    d.FromTaskID ??
+    d.fromTaskID;
 
   const getSuccId = (d) =>
     d.SuccessorTaskId ??
@@ -91,7 +96,11 @@ export default function App() {
     d.SuccessorId ??
     d.successorId ??
     d.succTaskId ??
-    d.succId;
+    d.succId ??
+    d.ToTaskId ??
+    d.toTaskId ??
+    d.ToTaskID ??
+    d.toTaskID;
 
   const getDepId = (d) => {
     const raw =
@@ -162,7 +171,6 @@ export default function App() {
 
   /* -------------------- deps maps for popup -------------------- */
   const depPairs = useMemo(() => {
-    // normalize deps into (predId, succId, type, lag, depId)
     const out = [];
     for (const d of deps || []) {
       const pred = normId(getPredId(d));
@@ -249,7 +257,9 @@ export default function App() {
     try {
       const bust = Date.now();
       const [sch, dep] = await Promise.all([
-        fetchJson(`${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`),
+        fetchJson(
+          `${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`
+        ),
         fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(nextProjectId)}&t=${bust}`),
       ]);
 
@@ -423,7 +433,7 @@ export default function App() {
             style={s.btnPrimary}
             onClick={() => setShowNewProject(true)}
             disabled={loading}
-            title="Create a new project from template"
+            title="Create a new project"
           >
             + New Project
           </button>
@@ -513,7 +523,7 @@ export default function App() {
                 <div style={s.cardHeader}>
                   <div>
                     <div style={s.cardTitle}>Gantt Preview</div>
-                    <div style={s.cardSub}>Now includes dependency connectors. Click a bar for predecessors/successors.</div>
+                    <div style={s.cardSub}>Includes dependency connectors. Click a bar for predecessors/successors.</div>
                   </div>
                 </div>
                 {tasks.length && projectStartDate ? (
@@ -523,6 +533,10 @@ export default function App() {
                     startDate={projectStartDate}
                     compact
                     onTaskClick={(id) => setSelectedTaskId(id)}
+                    getPredId={getPredId}
+                    getSuccId={getSuccId}
+                    getType={getType}
+                    getLag={getLag}
                   />
                 ) : (
                   <EmptyState text="Load a project (and LOI) to see a date-based Gantt." />
@@ -579,6 +593,10 @@ export default function App() {
                 deps={deps}
                 startDate={projectStartDate}
                 onTaskClick={(id) => setSelectedTaskId(id)}
+                getPredId={getPredId}
+                getSuccId={getSuccId}
+                getType={getType}
+                getLag={getLag}
               />
             ) : (
               <EmptyState text="Load a project (and LOI) to view date-based Gantt." />
@@ -597,7 +615,15 @@ export default function App() {
             </div>
 
             {tasks.length ? (
-              <NetworkDiagram tasks={tasks} deps={deps} getPredId={getPredId} getSuccId={getSuccId} getDepId={getDepId} getLag={getLag} getType={getType} />
+              <NetworkDiagram
+                tasks={tasks}
+                deps={deps}
+                getPredId={getPredId}
+                getSuccId={getSuccId}
+                getDepId={getDepId}
+                getLag={getLag}
+                getType={getType}
+              />
             ) : (
               <EmptyState text="Load a project to view network." />
             )}
@@ -676,21 +702,20 @@ export default function App() {
         )}
       </div>
 
-      {/* New Project Modal */}
+      {/* New Project Modal (NO template shown) */}
       {showNewProject && (
         <NewProjectModal
           bufferDays={BUFFER_DAYS_FIXED}
-          fixedTemplateName={FIXED_TEMPLATE_NAME}
           onClose={() => setShowNewProject(false)}
           loading={loading}
-          onCreate={async ({ projectName, templateName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
+          onCreate={async ({ projectName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
             setError("");
             setLoading(true);
-            setBusyMsg("Creating project from template (ratio scaling in backend)...");
+            setBusyMsg("Creating project...");
             try {
               const out = await createProject({
                 projectName,
-                templateName,
+                templateName: FIXED_TEMPLATE_NAME, // fixed Template 1 (not displayed)
                 bufferDays: BUFFER_DAYS_FIXED,
                 loiDate,
                 commissioningContractDate,
@@ -874,8 +899,8 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
   );
 }
 
-/* -------------------- New Project Modal -------------------- */
-function NewProjectModal({ onClose, onCreate, loading, bufferDays, fixedTemplateName }) {
+/* -------------------- New Project Modal (NO TEMPLATE SHOWN) -------------------- */
+function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
   const s = makeStyles();
 
   const [projectName, setProjectName] = useState("");
@@ -907,7 +932,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays, fixedTemplate
           <div>
             <div style={s.modalTitle}>Create New Project</div>
             <div style={s.modalSub}>
-              Template is fixed: <b>{fixedTemplateName}</b>. LOI is project start. Internal COD = Contract - {bufferDays} days.
+              LOI is project start. Internal commissioning date is derived as Contract - {bufferDays} days.
             </div>
           </div>
           <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
@@ -924,10 +949,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays, fixedTemplate
                 disabled={loading}
               />
             </Field>
-
-            <Field label="Template">
-              <input style={s.inputWide} value={fixedTemplateName} readOnly />
-            </Field>
+            <div />
           </div>
 
           <div style={{ marginTop: 14 }}>
@@ -962,7 +984,6 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays, fixedTemplate
             onClick={() => {
               onCreate({
                 projectName: projectName.trim(),
-                templateName: fixedTemplateName,
                 milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate },
                 loiDate,
                 commissioningContractDate: commContract,
@@ -1191,8 +1212,8 @@ function DepEditor({ depId, predName, initialType, initialLag, disabled, onUpdat
   );
 }
 
-/* -------------------- Date-based Gantt WITH CONNECTORS + CLICK -------------------- */
-function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
+/* -------------------- Date-based Gantt WITH VISIBLE CONNECTORS -------------------- */
+function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick, getPredId, getSuccId, getType, getLag }) {
   const s = makeStyles();
   const normId = (v) => (v == null ? null : String(v));
 
@@ -1219,8 +1240,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
   const canvasW = LEFT_COL_W + timelineW;
   const canvasH = HEADER_H + valid.length * ROW_H;
 
-  // weekly ticks to avoid clutter
-  const tickStep = 7;
+  const tickStep = 7; // weekly
 
   const dayToDate = (dayNo) => {
     const n = Number(dayNo);
@@ -1235,43 +1255,60 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
-  // Build index: TaskId -> row index and bar geometry
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
-      const yMid = HEADER_H + idx * ROW_H + ROW_H / 2;
+      const yTop = HEADER_H + idx * ROW_H;
+      const yMid = yTop + ROW_H / 2;
+
       const xStart = LEFT_COL_W + (t.ES - minStart) * PX_PER_DAY;
       const xEnd = LEFT_COL_W + (t.EF - minStart) * PX_PER_DAY;
-      m.set(normId(t.TaskId), { idx, yMid, xStart, xEnd, t });
+
+      m.set(normId(t.TaskId), { idx, yTop, yMid, xStart, xEnd, t });
     });
     return m;
   }, [valid, HEADER_H, ROW_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
-  // Normalize deps
+  // endpoints by link type (so pred vs succ is correct)
+  const pickEndpoints = (predGeom, succGeom, type) => {
+    const T = String(type || "FS").toUpperCase();
+    const predX = T === "SS" || T === "SF" ? predGeom.xStart : predGeom.xEnd;
+    const succX = T === "FF" || T === "SF" ? succGeom.xEnd : succGeom.xStart;
+    return { x1: predX, y1: predGeom.yMid, x2: succX, y2: succGeom.yMid, T };
+  };
+
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
-      const pred = normId(
-        d.PredecessorTaskId ?? d.predecessorTaskId ?? d.PredecessorId ?? d.predId ?? d.predTaskId
-      );
-      const succ = normId(
-        d.SuccessorTaskId ?? d.successorTaskId ?? d.SuccessorId ?? d.succId ?? d.succTaskId
-      );
+      const pred = normId(getPredId ? getPredId(d) : d.PredecessorTaskId);
+      const succ = normId(getSuccId ? getSuccId(d) : d.SuccessorTaskId);
       if (!pred || !succ) return;
-      const g1 = geom.get(pred);
-      const g2 = geom.get(succ);
-      if (!g1 || !g2) return;
 
-      const type = String(d.LinkType ?? d.linkType ?? "FS").toUpperCase();
-      const lag = Number(d.LagDays ?? d.lagDays ?? 0) || 0;
+      const gPred = geom.get(pred);
+      const gSucc = geom.get(succ);
+      if (!gPred || !gSucc) return;
 
-      // For drawing: default FS-like visual (pred end -> succ start).
-      // Even if SS/FF/SF exist, we still draw end->start line for visibility.
-      // (If you want true SS/FF rendering, that is a next step.)
-      out.push({ pred, succ, type, lag, from: g1, to: g2 });
+      const type = getType ? getType(d) : String(d.LinkType ?? d.linkType ?? "FS").toUpperCase();
+      const lag = getLag ? getLag(d) : Number(d.LagDays ?? d.lagDays ?? 0) || 0;
+
+      const ep = pickEndpoints(gPred, gSucc, type);
+
+      const lagPx = (Number(lag) || 0) * PX_PER_DAY;
+      const x2Lagged = ep.x2 + lagPx;
+
+      out.push({
+        pred,
+        succ,
+        type: ep.T,
+        lag: Number(lag) || 0,
+        x1: ep.x1,
+        y1: ep.y1,
+        x2: x2Lagged,
+        y2: ep.y2,
+      });
     });
     return out;
-  }, [deps, geom]);
+  }, [deps, geom, getPredId, getSuccId, getType, getLag, PX_PER_DAY]);
 
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
@@ -1311,11 +1348,11 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
             })}
           </div>
 
-          {/* SVG overlay for dependency connectors */}
+          {/* SVG overlay for dependency connectors (visible) */}
           <svg
             width={canvasW}
             height={canvasH}
-            style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}
+            style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 20 }}
           >
             <defs>
               <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
@@ -1324,33 +1361,36 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
             </defs>
 
             {edges.map((e, idx) => {
-              // routing: horizontal -> vertical -> horizontal (clean orthogonal)
-              const x1 = e.from.xEnd;
-              const y1 = e.from.yMid;
-              const x2 = e.to.xStart;
-              const y2 = e.to.yMid;
+              const x1 = e.x1;
+              const y1 = e.y1;
+              const x2 = e.x2;
+              const y2 = e.y2;
 
-              const midX = Math.min(x1 + 20, (x1 + x2) / 2);
-
-              // path segments
+              // always draw a clear elbow even if successor point is left of predecessor
+              const elbow = 22;
+              const midX = x2 >= x1 ? x1 + elbow : x1 - elbow;
               const d = `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`;
 
               return (
-                <path
-                  key={idx}
-                  d={d}
-                  fill="none"
-                  stroke="#111"
-                  strokeWidth="1.3"
-                  opacity="0.35"
-                  markerEnd="url(#arrowGantt)"
-                />
+                <g key={idx}>
+                  <path
+                    d={d}
+                    fill="none"
+                    stroke="#111"
+                    strokeWidth="1.6"
+                    opacity="0.55"
+                    markerEnd="url(#arrowGantt)"
+                  />
+                  <text x={x2 + 6} y={y2 - 6} fontSize="10" fill="#111" opacity="0.75">
+                    {e.type}{e.lag ? `+${e.lag}` : ""}
+                  </text>
+                </g>
               );
             })}
           </svg>
 
           {/* rows */}
-          <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW }}>
+          <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 10 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
               const w = Math.max(1, (t.EF - t.ES) * PX_PER_DAY);
@@ -1393,6 +1433,7 @@ function GanttDates({ tasks, deps, startDate, compact = false, onTaskClick }) {
                         border: "1px solid rgba(15,23,42,0.15)",
                         cursor: "pointer",
                         padding: 0,
+                        zIndex: 5,
                       }}
                       title="Click to view predecessors/successors"
                     />
@@ -1545,7 +1586,7 @@ function toISO(d) {
 }
 
 /* =========================================================
-   Styles (same as your existing)
+   Styles
    ========================================================= */
 function makeStyles() {
   const pageBg = "#f6f8fb";
@@ -1874,5 +1915,9 @@ function makeStyles() {
     relRow: { padding: "10px 10px", border: "1px solid #eef2f7", borderRadius: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 },
     relRowMain: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
     relRowMeta: { fontSize: 12, color: sub, fontWeight: 900, whiteSpace: "nowrap" },
+
+    // section titles (used in modal)
+    sectionTitle: { fontWeight: 950, marginBottom: 4 },
+    sectionSub: { fontSize: 12, color: sub, fontWeight: 800 },
   };
 }
