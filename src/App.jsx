@@ -21,7 +21,7 @@ const TABS = [
 ];
 
 const BUFFER_DAYS_FIXED = 30;
-const FIXED_TEMPLATE_NAME = "Solar EPC Master v1";
+const FIXED_TEMPLATE_NAME = "Template 3 (Imported from Google Sheet)";
 
 const MILESTONE_FIELDS = [
   { key: "LOI", label: "LOI (Project Start)", required: true },
