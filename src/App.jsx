@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-import { FixedSizeList as List } from "react-window";
 
 /**
  * MSP Lite — App.jsx
@@ -1122,109 +1121,126 @@ function TaskTable({
 }) {
   const s = makeStyles();
 
-  // -------- group config (Workstream -> part1 -> part2) ----------
+  // -------- group config (Workstream -> part1 -> part2 -> part3) ----------
   function splitParts(taskName) {
     const raw = String(taskName || "").trim();
     if (!raw) return ["(Unnamed)"];
+    // split strictly on " - " (not partial hyphen)
     const parts = raw.split(" - ").map((x) => x.trim()).filter(Boolean);
+    // use up to 3 parts for grouping
     return parts.length ? parts.slice(0, 3) : [raw];
   }
 
-  function buildTree(tasksList) {
-    const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
+  // Node structure:
+  // { id, label, depth, children: Map, taskIds: [], agg: {durSum, minES, maxEF, count} }
+function buildTree(tasksList) {
+  const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
 
-    const taskById = new Map();
-    (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
+  const taskById = new Map();
+  (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
 
-    function getOrCreate(parent, id, label, depth) {
-      if (!parent.children.has(id)) {
-        parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
-      }
-      return parent.children.get(id);
+  function getOrCreate(parent, id, label, depth) {
+    if (!parent.children.has(id)) {
+      parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
     }
-
-    // Step 1: Workstream -> Part-1, collect raw p2 buckets
-    for (const t of tasksList || []) {
-      const tid = normalizeId(t.TaskId);
-      if (!tid) continue;
-
-      const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
-      const parts = splitParts(t.TaskName);
-
-      const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
-
-      const p1 = parts[0] || "(No Part-1)";
-      const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
-
-      if (!p1Node._raw) p1Node._raw = [];
-      p1Node._raw.push({ tid, p2: (parts[1] || "").trim() });
-    }
-
-    // Step 2: decide part-2 grouping
-    for (const wsNode of root.children.values()) {
-      for (const p1Node of wsNode.children.values()) {
-        const raw = p1Node._raw || [];
-        const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
-
-        if (p2Set.size <= 1) {
-          p1Node.taskIds = raw.map((x) => x.tid);
-          delete p1Node._raw;
-          continue;
-        }
-
-        for (const x of raw) {
-          const p2Label = x.p2 || "(No Part-2)";
-          const p2Node = getOrCreate(p1Node, `P2:${wsNode.label}::${p1Node.label}::${p2Label}`, p2Label, 2);
-          p2Node.taskIds.push(x.tid);
-        }
-        delete p1Node._raw;
-      }
-    }
-
-    // Step 3: aggregates bottom-up
-    function computeAgg(node) {
-      let durSum = 0;
-      let minES = null;
-      let maxEF = null;
-      let count = 0;
-
-      for (const tid of node.taskIds || []) {
-        const t = taskById.get(tid);
-        if (!t) continue;
-
-        const d = Number(t.DurationDays);
-        if (Number.isFinite(d)) durSum += d;
-
-        const es = Number(t.ES);
-        const ef = Number(t.EF);
-        if (Number.isFinite(es)) minES = minES == null ? es : Math.min(minES, es);
-        if (Number.isFinite(ef)) maxEF = maxEF == null ? ef : Math.max(maxEF, ef);
-
-        count += 1;
-      }
-
-      for (const child of node.children.values()) {
-        const a = computeAgg(child);
-        if (!a) continue;
-        durSum += a.durSum;
-        if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
-        if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
-        count += a.count;
-      }
-
-      node.agg = { durSum, minES, maxEF, count };
-      return node.agg;
-    }
-
-    computeAgg(root);
-    return { root, taskById };
+    return parent.children.get(id);
   }
 
-  const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]);
+  // Step 1) Build Workstream -> Part-1 nodes, and collect tasks "raw" under Part-1
+  for (const t of tasksList || []) {
+    const tid = normalizeId(t.TaskId);
+    if (!tid) continue;
 
-  // expanded state
+    const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
+    const parts = splitParts(t.TaskName); // returns up to 3 parts
+
+    const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
+
+    const p1 = parts[0] || "(No Part-1)";
+    const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
+
+    // store raw attachments for decision on Part-2 grouping
+    if (!p1Node._raw) p1Node._raw = [];
+    p1Node._raw.push({
+      tid,
+      p2: (parts[1] || "").trim(), // may be empty
+      // p3 exists but we NEVER group by it; it's just part of task name leaf
+    });
+  }
+
+  // Step 2) For each Part-1 node, decide whether Part-2 grouping is needed
+  for (const wsNode of root.children.values()) {
+    for (const p1Node of wsNode.children.values()) {
+      const raw = p1Node._raw || [];
+
+      // distinct non-empty Part-2 values under this Part-1
+      const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
+
+      // If Part-2 doesn't differentiate (0 or 1 unique non-empty values) => attach tasks directly to Part-1
+      if (p2Set.size <= 1) {
+        p1Node.taskIds = raw.map((x) => x.tid);
+        delete p1Node._raw;
+        continue;
+      }
+
+      // Else create Part-2 groups (depth = 2) and attach tasks there
+      for (const x of raw) {
+        const p2Label = x.p2 || "(No Part-2)";
+        const p2Node = getOrCreate(p1Node, `P2:${wsNode.label}::${p1Node.label}::${p2Label}`, p2Label, 2);
+        p2Node.taskIds.push(x.tid);
+      }
+
+      delete p1Node._raw;
+    }
+  }
+
+  // Step 3) Compute aggregates bottom-up
+  function computeAgg(node) {
+    let durSum = 0;
+    let minES = null;
+    let maxEF = null;
+    let count = 0;
+
+    for (const tid of node.taskIds || []) {
+      const t = taskById.get(tid);
+      if (!t) continue;
+
+      const d = Number(t.DurationDays);
+      if (Number.isFinite(d)) durSum += d;
+
+      const es = Number(t.ES);
+      const ef = Number(t.EF);
+      if (Number.isFinite(es)) minES = minES == null ? es : Math.min(minES, es);
+      if (Number.isFinite(ef)) maxEF = maxEF == null ? ef : Math.max(maxEF, ef);
+
+      count += 1;
+    }
+
+    for (const child of node.children.values()) {
+      const a = computeAgg(child);
+      if (!a) continue;
+
+      durSum += a.durSum;
+      if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
+      if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
+      count += a.count;
+    }
+
+    node.agg = { durSum, minES, maxEF, count };
+    return node.agg;
+  }
+
+  computeAgg(root);
+  return { root, taskById };
+}
+
+
+  const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // expanded state: default collapsed (only show Workstream groups)
   const [expanded, setExpanded] = useState(() => new Set());
 
+  // helpers
   const toggle = (nodeId) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1248,166 +1264,130 @@ function TaskTable({
 
   const collapseAll = () => setExpanded(new Set());
 
-  // flatten rows (group + task), but only those visible under expanded set
+  // flatten tree into table rows
   const flatRows = useMemo(() => {
     const out = [];
 
-    function pushNode(node) {
-      if (node.depth >= 0) out.push({ kind: "group", node });
+    function pushGroup(node) {
+      // skip ROOT
+      if (node.depth >= 0) {
+        out.push({ kind: "group", node });
+      }
 
       const isOpen = node.depth < 0 ? true : expanded.has(node.id);
       if (!isOpen) return;
 
-      const children = Array.from(node.children.values());
-      children.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+      // children first (so structure is visible)
+      for (const child of node.children.values()) {
+        pushGroup(child);
+      }
 
-      for (const child of children) pushNode(child);
-
+      // then tasks directly under this group
       for (const tid of node.taskIds || []) {
         const t = taskById.get(tid);
         if (t) out.push({ kind: "task", task: t });
       }
     }
 
-    // workstream ordering priority
     const wsNodes = Array.from(root.children.values());
-    const WS_PRIORITY = ["INPUT", "DESIGN"];
-    wsNodes.sort((a, b) => {
-      const A = String(a.label || "").toUpperCase();
-      const B = String(b.label || "").toUpperCase();
-      const ia = WS_PRIORITY.indexOf(A);
-      const ib = WS_PRIORITY.indexOf(B);
-      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-      return A.localeCompare(B);
-    });
 
-    for (const wsNode of wsNodes) pushNode(wsNode);
+const WS_PRIORITY = ["INPUT", "DESIGN"]; // required order
+wsNodes.sort((a, b) => {
+  const A = String(a.label || "").toUpperCase();
+  const B = String(b.label || "").toUpperCase();
+
+  const ia = WS_PRIORITY.indexOf(A);
+  const ib = WS_PRIORITY.indexOf(B);
+
+  if (ia !== -1 || ib !== -1) {
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  }
+  return A.localeCompare(B);
+});
+
+for (const wsNode of wsNodes) pushGroup(wsNode);
+
 
     return out;
   }, [root, taskById, expanded]);
 
-  // virtual list sizing
-  const ROW_H = 92; // task rows are tall because of dependency UI; tune this if needed
-  const GROUP_H = 52;
-  const HEADER_H = 44;
-  const LIST_H = Math.min(760, window.innerHeight - 320); // reasonable default
-
-  // react-window requires a stable itemSize per row:
-  // Use VariableSizeList if you want different heights; but FixedSize is faster.
-  // We'll approximate by using a single row height and compact the content a bit.
-  const ITEM_H = 92;
-
-  // Row renderer
-  const Row = ({ index, style }) => {
-    const r = flatRows[index];
-
-    // react-window style includes absolute positioning; apply it to the row wrapper
-    if (!r) return null;
-
-    if (r.kind === "group") {
-      return (
-        <div style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-          <GroupRowVirtual
-            node={r.node}
-            expanded={expanded.has(r.node.id)}
-            onToggle={() => toggle(r.node.id)}
-            dayToDate={dayToDate}
-            fmtDDMMMYY={fmtDDMMMYY}
-            disabled={disabled}
-          />
-        </div>
-      );
-    }
-
-    return (
-      <div style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-        <TaskRowVirtual
-          task={r.task}
-          tasks={tasks}
-          depPairs={depPairs}
-          disabled={disabled}
-          dayToDate={dayToDate}
-          fmtDDMMMYY={fmtDDMMMYY}
-          onSaveDuration={onSaveDuration}
-          onAddDep={onAddDep}
-          onUpdateDep={onUpdateDep}
-          onDeleteDep={onDeleteDep}
-        />
-      </div>
-    );
-  };
-
   return (
-    <div style={{ padding: 14 }}>
+    <div style={{ padding: 14, overflowX: "auto" }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={s.btn} onClick={expandAll} disabled={disabled}>Expand All</button>
-        <button style={s.btn} onClick={collapseAll} disabled={disabled}>Collapse All</button>
-        <div style={{ marginLeft: 8, color: "#64748b", fontWeight: 900, fontSize: 12 }}>
-          Rows: {flatRows.length}
-        </div>
+        <button style={s.btn} onClick={expandAll} disabled={disabled}>
+          Expand All
+        </button>
+        <button style={s.btn} onClick={collapseAll} disabled={disabled}>
+          Collapse All
+        </button>
       </div>
 
-      {/* Header (grid) */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: s.ttCols,
-          position: "sticky",
-          top: 0,
-          zIndex: 5,
-          background: "#f1f5f9",
-          border: "1px solid #e5eaf0",
-          borderRadius: 12,
-          overflow: "hidden",
-        }}
-      >
-        {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map((h) => (
-          <div key={h} style={{ padding: "10px 10px", fontWeight: 950, borderRight: "1px solid #e5eaf0", whiteSpace: "nowrap" }}>
-            {h}
-          </div>
-        ))}
-      </div>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map(
+              (h) => (
+                <th key={h} style={s.th}>
+                  {h}
+                </th>
+              )
+            )}
+          </tr>
+        </thead>
 
-      {/* Virtualized body */}
-      <div style={{ border: "1px solid #e5eaf0", borderRadius: 12, overflow: "hidden", marginTop: 10, background: "#fff" }}>
-        <List
-          height={LIST_H}
-          itemCount={flatRows.length}
-          itemSize={ITEM_H}
-          width={"100%"}
-        >
-          {Row}
-        </List>
-      </div>
+        <tbody>
+          {flatRows.map((r, idx) => {
+            if (r.kind === "group") {
+              return (
+                <GroupRow
+                  key={r.node.id}
+                  node={r.node}
+                  expanded={expanded.has(r.node.id)}
+                  onToggle={() => toggle(r.node.id)}
+                  dayToDate={dayToDate}
+                  fmtDDMMMYY={fmtDDMMMYY}
+                  disabled={disabled}
+                />
+              );
+            }
+
+            // task row (FULL columns)
+            return (
+              <TaskRow
+                key={normalizeId(r.task.TaskId)}
+                rowIndex={idx}
+                task={r.task}
+                tasks={tasks}
+                depPairs={depPairs}
+                disabled={disabled}
+                dayToDate={dayToDate}
+                fmtDDMMMYY={fmtDDMMMYY}
+                onSaveDuration={onSaveDuration}
+                onAddDep={onAddDep}
+                onUpdateDep={onUpdateDep}
+                onDeleteDep={onDeleteDep}
+              />
+            );
+          })}
+
+          {!tasks?.length && (
+            <tr>
+              <td colSpan={7} style={{ padding: 14, color: "#475569" }}>
+                No tasks found.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
 
       <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Group rows aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
+        Dates shown are Target Dates (LOI + ES/EF). Group rows are aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
       </div>
     </div>
   );
 }
 
-/* =========================================================
-   Virtual row components (div-grid cells)
-   ========================================================= */
-
-function Cell({ children, style }) {
-  return (
-    <div
-      style={{
-        padding: "10px 10px",
-        borderBottom: "1px solid #eef2f7",
-        borderRight: "1px solid #eef2f7",
-        overflow: "hidden",
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
+function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
   const s = makeStyles();
 
   const hasChildren = node.children && node.children.size > 0;
@@ -1421,9 +1401,9 @@ function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disa
   const indentPx = 12 + node.depth * 16;
 
   return (
-    <>
-      <Cell style={{ background: "#f1f5f9", fontWeight: 950 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx, minWidth: 0 }}>
+    <tr style={{ background: "#f1f5f9" }}>
+      <td style={{ ...s.td, fontWeight: 950 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx }}>
           <button
             type="button"
             onClick={onToggle}
@@ -1436,7 +1416,6 @@ function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disa
               background: "#fff",
               cursor: disabled || !canToggle ? "not-allowed" : "pointer",
               fontWeight: 950,
-              flex: "0 0 auto",
             }}
             title={canToggle ? "Expand/Collapse" : "No children"}
           >
@@ -1449,26 +1428,24 @@ function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disa
             </div>
           </div>
         </div>
-      </Cell>
+      </td>
 
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {Number.isFinite(Number(a.durSum)) ? a.durSum : ""}
-      </Cell>
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {start ? fmtDDMMMYY(start) : ""}
-      </Cell>
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {finish ? fmtDDMMMYY(finish) : ""}
-      </Cell>
+      {/* Group row: ONLY Dur + Target Start/Finish */}
+      <td style={s.tdMono}>{Number.isFinite(Number(a.durSum)) ? a.durSum : ""}</td>
+      <td style={s.tdMono}>{start ? fmtDDMMMYY(start) : ""}</td>
+      <td style={s.tdMono}>{finish ? fmtDDMMMYY(finish) : ""}</td>
 
-      <Cell style={{ background: "#f1f5f9" }} />
-      <Cell style={{ background: "#f1f5f9" }} />
-      <Cell style={{ background: "#f1f5f9" }} />
-    </>
+      {/* No Float/Critical/Deps at group level */}
+      <td style={s.tdMono}></td>
+      <td style={s.tdMono}></td>
+      <td style={s.td}></td>
+    </tr>
   );
 }
 
-function TaskRowVirtual({
+/* -------------------- Individual Task Row (UNCHANGED behavior) -------------------- */
+function TaskRow({
+  rowIndex,
   task,
   tasks,
   depPairs,
@@ -1490,13 +1467,15 @@ function TaskRowVirtual({
   const finishDt = dayToDate(task.EF);
 
   return (
-    <>
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+    <tr style={{ background: isCrit ? "#fff7ed" : rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
+      {/* Workstream / Task */}
+      <td style={s.td}>
         <div style={{ fontWeight: 800, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
-        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.TaskName ?? ""}</div>
-      </Cell>
+        <div style={{ fontWeight: 950 }}>{task.TaskName ?? ""}</div>
+      </td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+      {/* Dur + Save */}
+      <td style={s.td}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
             style={s.tdInput}
@@ -1514,24 +1493,18 @@ function TaskRowVirtual({
             Save
           </button>
         </div>
-      </Cell>
+      </td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {fmtDDMMMYY(startDt)}
-      </Cell>
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {fmtDDMMMYY(finishDt)}
-      </Cell>
+      {/* Target Start/Finish */}
+      <td style={s.tdMono}>{fmtDDMMMYY(startDt)}</td>
+      <td style={s.tdMono}>{fmtDDMMMYY(finishDt)}</td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {task.TotalFloat ?? ""}
-      </Cell>
+      {/* Float/Critical */}
+      <td style={s.tdMono}>{task.TotalFloat ?? ""}</td>
+      <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>
-        {isCrit ? "YES" : ""}
-      </Cell>
-
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+      {/* Dependencies */}
+      <td style={{ ...s.td, minWidth: 520 }}>
         <PerTaskDependencies
           tasks={tasks}
           depPairs={depPairs}
@@ -1541,11 +1514,10 @@ function TaskRowVirtual({
           onUpdateDep={onUpdateDep}
           onDeleteDep={onDeleteDep}
         />
-      </Cell>
-    </>
+      </td>
+    </tr>
   );
 }
-
 
 function PerTaskDependencies({
   tasks,
@@ -2685,6 +2657,6 @@ depText: {
   overflow: "visible",
   lineHeight: 1.2,
 },
-ttCols: "420px 140px 140px 140px 110px 110px minmax(520px, 1fr)",
+
   };
 }
