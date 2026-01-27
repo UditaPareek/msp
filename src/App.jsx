@@ -1107,6 +1107,7 @@ function Field({ label, required, hint, children }) {
 }
 
 /* -------------------- Task Table (per-task Add Dependency only) -------------------- */
+/* -------------------- Task Table (GROUPED) -------------------- */
 function TaskTable({
   tasks,
   disabled,
@@ -1120,50 +1121,304 @@ function TaskTable({
 }) {
   const s = makeStyles();
 
+  // -------- group config (Workstream -> part1 -> part2 -> part3) ----------
+  function splitParts(taskName) {
+    const raw = String(taskName || "").trim();
+    if (!raw) return ["(Unnamed)"];
+    // split strictly on " - " (not partial hyphen)
+    const parts = raw.split(" - ").map((x) => x.trim()).filter(Boolean);
+    // use up to 3 parts for grouping
+    return parts.length ? parts.slice(0, 3) : [raw];
+  }
+
+  // Node structure:
+  // { id, label, depth, children: Map, taskIds: [], agg: {durSum, minES, maxEF, count} }
+  function buildTree(tasksList) {
+    const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
+
+    const taskById = new Map();
+    (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
+
+    function getOrCreate(parent, id, label, depth) {
+      if (!parent.children.has(id)) {
+        parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
+      }
+      return parent.children.get(id);
+    }
+
+    for (const t of tasksList || []) {
+      const tid = normalizeId(t.TaskId);
+      if (!tid) continue;
+
+      const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
+      const parts = splitParts(t.TaskName);
+
+      const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
+
+      const p1 = parts[0] || "(No Part-1)";
+      const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
+
+      // if only 1 part -> task attaches here
+      if (!parts[1]) {
+        p1Node.taskIds.push(tid);
+        continue;
+      }
+
+      const p2 = parts[1];
+      const p2Node = getOrCreate(p1Node, `P2:${ws}::${p1}::${p2}`, p2, 2);
+
+      // if only 2 parts -> task attaches here
+      if (!parts[2]) {
+        p2Node.taskIds.push(tid);
+        continue;
+      }
+
+      const p3 = parts[2];
+      const p3Node = getOrCreate(p2Node, `P3:${ws}::${p1}::${p2}::${p3}`, p3, 3);
+      p3Node.taskIds.push(tid);
+    }
+
+    // compute aggregates bottom-up
+    function computeAgg(node) {
+      let durSum = 0;
+      let minES = null;
+      let maxEF = null;
+      let count = 0;
+
+      // tasks directly in this node
+      for (const tid of node.taskIds || []) {
+        const t = taskById.get(tid);
+        if (!t) continue;
+
+        const d = Number(t.DurationDays);
+        if (Number.isFinite(d)) durSum += d;
+
+        const es = Number(t.ES);
+        const ef = Number(t.EF);
+        if (Number.isFinite(es)) minES = minES == null ? es : Math.min(minES, es);
+        if (Number.isFinite(ef)) maxEF = maxEF == null ? ef : Math.max(maxEF, ef);
+
+        count += 1;
+      }
+
+      // children aggregates
+      for (const child of node.children.values()) {
+        const a = computeAgg(child);
+        if (!a) continue;
+
+        durSum += a.durSum;
+        if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
+        if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
+        count += a.count;
+      }
+
+      node.agg = { durSum, minES, maxEF, count };
+      return node.agg;
+    }
+    computeAgg(root);
+
+    return { root, taskById };
+  }
+
+  const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // expanded state: default collapsed (only show Workstream groups)
+  const [expanded, setExpanded] = useState(() => new Set());
+
+  // helpers
+  const toggle = (nodeId) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  };
+
+  const expandAll = () => {
+    const all = new Set();
+    function walk(n) {
+      for (const c of n.children.values()) {
+        all.add(c.id);
+        walk(c);
+      }
+    }
+    walk(root);
+    setExpanded(all);
+  };
+
+  const collapseAll = () => setExpanded(new Set());
+
+  // flatten tree into table rows
+  const flatRows = useMemo(() => {
+    const out = [];
+
+    function pushGroup(node) {
+      // skip ROOT
+      if (node.depth >= 0) {
+        out.push({ kind: "group", node });
+      }
+
+      const isOpen = node.depth < 0 ? true : expanded.has(node.id);
+      if (!isOpen) return;
+
+      // children first (so structure is visible)
+      for (const child of node.children.values()) {
+        pushGroup(child);
+      }
+
+      // then tasks directly under this group
+      for (const tid of node.taskIds || []) {
+        const t = taskById.get(tid);
+        if (t) out.push({ kind: "task", task: t });
+      }
+    }
+
+    // show all workstreams as first-level groups
+    for (const wsNode of root.children.values()) {
+      pushGroup(wsNode);
+    }
+
+    return out;
+  }, [root, taskById, expanded]);
+
   return (
     <div style={{ padding: 14, overflowX: "auto" }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+        <button style={s.btn} onClick={expandAll} disabled={disabled}>
+          Expand All
+        </button>
+        <button style={s.btn} onClick={collapseAll} disabled={disabled}>
+          Collapse All
+        </button>
+        <div style={s.note}>
+          Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>). Group rows show
+          aggregated dates + duration. Expand to edit individual tasks.
+        </div>
+      </div>
+
       <table style={s.table}>
         <thead>
           <tr>
-            {["Workstream", "Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map((h) => (
-              <th key={h} style={s.th}>{h}</th>
-            ))}
+            {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map(
+              (h) => (
+                <th key={h} style={s.th}>
+                  {h}
+                </th>
+              )
+            )}
           </tr>
         </thead>
 
         <tbody>
-          {(tasks || []).map((t, idx) => (
-            <TaskRow
-              key={normalizeId(t.TaskId)}
-              rowIndex={idx}
-              task={t}
-              tasks={tasks}
-              depPairs={depPairs}
-              disabled={disabled}
-              dayToDate={dayToDate}
-              fmtDDMMMYY={fmtDDMMMYY}
-              onSaveDuration={onSaveDuration}
-              onAddDep={onAddDep}
-              onUpdateDep={onUpdateDep}
-              onDeleteDep={onDeleteDep}
-            />
-          ))}
+          {flatRows.map((r, idx) => {
+            if (r.kind === "group") {
+              return (
+                <GroupRow
+                  key={r.node.id}
+                  node={r.node}
+                  expanded={expanded.has(r.node.id)}
+                  onToggle={() => toggle(r.node.id)}
+                  dayToDate={dayToDate}
+                  fmtDDMMMYY={fmtDDMMMYY}
+                  disabled={disabled}
+                />
+              );
+            }
+
+            // task row (FULL columns)
+            return (
+              <TaskRow
+                key={normalizeId(r.task.TaskId)}
+                rowIndex={idx}
+                task={r.task}
+                tasks={tasks}
+                depPairs={depPairs}
+                disabled={disabled}
+                dayToDate={dayToDate}
+                fmtDDMMMYY={fmtDDMMMYY}
+                onSaveDuration={onSaveDuration}
+                onAddDep={onAddDep}
+                onUpdateDep={onUpdateDep}
+                onDeleteDep={onDeleteDep}
+              />
+            );
+          })}
 
           {!tasks?.length && (
             <tr>
-              <td colSpan={8} style={{ padding: 14, color: "#475569" }}>No tasks found.</td>
+              <td colSpan={7} style={{ padding: 14, color: "#475569" }}>
+                No tasks found.
+              </td>
             </tr>
           )}
         </tbody>
       </table>
 
       <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Dependencies are added per task row only.
+        Dates shown are Target Dates (LOI + ES/EF). Group rows are aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
       </div>
     </div>
   );
 }
 
+function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
+  const s = makeStyles();
+
+  const hasChildren = node.children && node.children.size > 0;
+  const hasTasks = (node.taskIds || []).length > 0;
+  const canToggle = hasChildren || hasTasks;
+
+  const a = node.agg || { durSum: 0, minES: null, maxEF: null, count: 0 };
+  const start = a.minES == null ? null : dayToDate(a.minES);
+  const finish = a.maxEF == null ? null : dayToDate(a.maxEF);
+
+  const indentPx = 12 + node.depth * 16;
+
+  return (
+    <tr style={{ background: "#f1f5f9" }}>
+      <td style={{ ...s.td, fontWeight: 950 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx }}>
+          <button
+            type="button"
+            onClick={onToggle}
+            disabled={disabled || !canToggle}
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 10,
+              border: "1px solid #e5eaf0",
+              background: "#fff",
+              cursor: disabled || !canToggle ? "not-allowed" : "pointer",
+              fontWeight: 950,
+            }}
+            title={canToggle ? "Expand/Collapse" : "No children"}
+          >
+            {canToggle ? (expanded ? "–" : "+") : "·"}
+          </button>
+
+          <div style={{ minWidth: 0 }}>
+            <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {node.label} <span style={{ color: "#64748b", fontWeight: 900 }}>({a.count})</span>
+            </div>
+          </div>
+        </div>
+      </td>
+
+      {/* Group row: ONLY Dur + Target Start/Finish */}
+      <td style={s.tdMono}>{Number.isFinite(Number(a.durSum)) ? a.durSum : ""}</td>
+      <td style={s.tdMono}>{start ? fmtDDMMMYY(start) : ""}</td>
+      <td style={s.tdMono}>{finish ? fmtDDMMMYY(finish) : ""}</td>
+
+      {/* No Float/Critical/Deps at group level */}
+      <td style={s.tdMono}></td>
+      <td style={s.tdMono}></td>
+      <td style={s.td}></td>
+    </tr>
+  );
+}
+
+/* -------------------- Individual Task Row (UNCHANGED behavior) -------------------- */
 function TaskRow({
   rowIndex,
   task,
@@ -1188,9 +1443,13 @@ function TaskRow({
 
   return (
     <tr style={{ background: isCrit ? "#fff7ed" : rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
-      <td style={s.td}>{task.Workstream ?? ""}</td>
-      <td style={{ ...s.td, fontWeight: 950 }}>{task.TaskName ?? ""}</td>
+      {/* Workstream / Task */}
+      <td style={s.td}>
+        <div style={{ fontWeight: 800, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
+        <div style={{ fontWeight: 950 }}>{task.TaskName ?? ""}</div>
+      </td>
 
+      {/* Dur + Save */}
       <td style={s.td}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
@@ -1211,11 +1470,15 @@ function TaskRow({
         </div>
       </td>
 
+      {/* Target Start/Finish */}
       <td style={s.tdMono}>{fmtDDMMMYY(startDt)}</td>
       <td style={s.tdMono}>{fmtDDMMMYY(finishDt)}</td>
+
+      {/* Float/Critical */}
       <td style={s.tdMono}>{task.TotalFloat ?? ""}</td>
       <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
+      {/* Dependencies */}
       <td style={{ ...s.td, minWidth: 520 }}>
         <PerTaskDependencies
           tasks={tasks}
