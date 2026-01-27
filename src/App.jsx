@@ -1133,92 +1133,107 @@ function TaskTable({
 
   // Node structure:
   // { id, label, depth, children: Map, taskIds: [], agg: {durSum, minES, maxEF, count} }
-  function buildTree(tasksList) {
-    const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
+function buildTree(tasksList) {
+  const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
 
-    const taskById = new Map();
-    (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
+  const taskById = new Map();
+  (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
 
-    function getOrCreate(parent, id, label, depth) {
-      if (!parent.children.has(id)) {
-        parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
-      }
-      return parent.children.get(id);
+  function getOrCreate(parent, id, label, depth) {
+    if (!parent.children.has(id)) {
+      parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
     }
-
-    for (const t of tasksList || []) {
-      const tid = normalizeId(t.TaskId);
-      if (!tid) continue;
-
-      const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
-      const parts = splitParts(t.TaskName);
-
-      const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
-
-      const p1 = parts[0] || "(No Part-1)";
-      const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
-
-      // if only 1 part -> task attaches here
-      if (!parts[1]) {
-        p1Node.taskIds.push(tid);
-        continue;
-      }
-
-      const p2 = parts[1];
-      const p2Node = getOrCreate(p1Node, `P2:${ws}::${p1}::${p2}`, p2, 2);
-
-      // if only 2 parts -> task attaches here
-      if (!parts[2]) {
-        p2Node.taskIds.push(tid);
-        continue;
-      }
-
-      const p3 = parts[2];
-      const p3Node = getOrCreate(p2Node, `P3:${ws}::${p1}::${p2}::${p3}`, p3, 3);
-      p3Node.taskIds.push(tid);
-    }
-
-    // compute aggregates bottom-up
-    function computeAgg(node) {
-      let durSum = 0;
-      let minES = null;
-      let maxEF = null;
-      let count = 0;
-
-      // tasks directly in this node
-      for (const tid of node.taskIds || []) {
-        const t = taskById.get(tid);
-        if (!t) continue;
-
-        const d = Number(t.DurationDays);
-        if (Number.isFinite(d)) durSum += d;
-
-        const es = Number(t.ES);
-        const ef = Number(t.EF);
-        if (Number.isFinite(es)) minES = minES == null ? es : Math.min(minES, es);
-        if (Number.isFinite(ef)) maxEF = maxEF == null ? ef : Math.max(maxEF, ef);
-
-        count += 1;
-      }
-
-      // children aggregates
-      for (const child of node.children.values()) {
-        const a = computeAgg(child);
-        if (!a) continue;
-
-        durSum += a.durSum;
-        if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
-        if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
-        count += a.count;
-      }
-
-      node.agg = { durSum, minES, maxEF, count };
-      return node.agg;
-    }
-    computeAgg(root);
-
-    return { root, taskById };
+    return parent.children.get(id);
   }
+
+  // Step 1) Build Workstream -> Part-1 nodes, and collect tasks "raw" under Part-1
+  for (const t of tasksList || []) {
+    const tid = normalizeId(t.TaskId);
+    if (!tid) continue;
+
+    const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
+    const parts = splitParts(t.TaskName); // returns up to 3 parts
+
+    const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
+
+    const p1 = parts[0] || "(No Part-1)";
+    const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
+
+    // store raw attachments for decision on Part-2 grouping
+    if (!p1Node._raw) p1Node._raw = [];
+    p1Node._raw.push({
+      tid,
+      p2: (parts[1] || "").trim(), // may be empty
+      // p3 exists but we NEVER group by it; it's just part of task name leaf
+    });
+  }
+
+  // Step 2) For each Part-1 node, decide whether Part-2 grouping is needed
+  for (const wsNode of root.children.values()) {
+    for (const p1Node of wsNode.children.values()) {
+      const raw = p1Node._raw || [];
+
+      // distinct non-empty Part-2 values under this Part-1
+      const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
+
+      // If Part-2 doesn't differentiate (0 or 1 unique non-empty values) => attach tasks directly to Part-1
+      if (p2Set.size <= 1) {
+        p1Node.taskIds = raw.map((x) => x.tid);
+        delete p1Node._raw;
+        continue;
+      }
+
+      // Else create Part-2 groups (depth = 2) and attach tasks there
+      for (const x of raw) {
+        const p2Label = x.p2 || "(No Part-2)";
+        const p2Node = getOrCreate(p1Node, `P2:${wsNode.label}::${p1Node.label}::${p2Label}`, p2Label, 2);
+        p2Node.taskIds.push(x.tid);
+      }
+
+      delete p1Node._raw;
+    }
+  }
+
+  // Step 3) Compute aggregates bottom-up
+  function computeAgg(node) {
+    let durSum = 0;
+    let minES = null;
+    let maxEF = null;
+    let count = 0;
+
+    for (const tid of node.taskIds || []) {
+      const t = taskById.get(tid);
+      if (!t) continue;
+
+      const d = Number(t.DurationDays);
+      if (Number.isFinite(d)) durSum += d;
+
+      const es = Number(t.ES);
+      const ef = Number(t.EF);
+      if (Number.isFinite(es)) minES = minES == null ? es : Math.min(minES, es);
+      if (Number.isFinite(ef)) maxEF = maxEF == null ? ef : Math.max(maxEF, ef);
+
+      count += 1;
+    }
+
+    for (const child of node.children.values()) {
+      const a = computeAgg(child);
+      if (!a) continue;
+
+      durSum += a.durSum;
+      if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
+      if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
+      count += a.count;
+    }
+
+    node.agg = { durSum, minES, maxEF, count };
+    return node.agg;
+  }
+
+  computeAgg(root);
+  return { root, taskById };
+}
+
 
   const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1274,10 +1289,24 @@ function TaskTable({
       }
     }
 
-    // show all workstreams as first-level groups
-    for (const wsNode of root.children.values()) {
-      pushGroup(wsNode);
-    }
+    const wsNodes = Array.from(root.children.values());
+
+const WS_PRIORITY = ["INPUT", "DESIGN"]; // required order
+wsNodes.sort((a, b) => {
+  const A = String(a.label || "").toUpperCase();
+  const B = String(b.label || "").toUpperCase();
+
+  const ia = WS_PRIORITY.indexOf(A);
+  const ib = WS_PRIORITY.indexOf(B);
+
+  if (ia !== -1 || ib !== -1) {
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  }
+  return A.localeCompare(B);
+});
+
+for (const wsNode of wsNodes) pushGroup(wsNode);
+
 
     return out;
   }, [root, taskById, expanded]);
@@ -1291,10 +1320,6 @@ function TaskTable({
         <button style={s.btn} onClick={collapseAll} disabled={disabled}>
           Collapse All
         </button>
-        <div style={s.note}>
-          Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>). Group rows show
-          aggregated dates + duration. Expand to edit individual tasks.
-        </div>
       </div>
 
       <table style={s.table}>
@@ -2050,6 +2075,15 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
 
+  // ✅ keep only critical tasks
+  const criticalTasks = useMemo(() => {
+    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true);
+  }, [tasks]);
+
+  const criticalIdSet = useMemo(() => {
+    return new Set(criticalTasks.map((t) => normId(t.TaskId)));
+  }, [criticalTasks]);
+
   const { nodes, edges, w, h } = useMemo(() => {
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: "LR", nodesep: 30, ranksep: 70, marginx: 20, marginy: 20 });
@@ -2058,18 +2092,17 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    const taskMap = new Map((tasks || []).map((t) => [normId(t.TaskId), t]));
+    // ✅ nodes: critical only
+    for (const t of criticalTasks) g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
 
-    for (const t of tasks || []) {
-      g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
-    }
-
+    // ✅ edges: only between critical nodes
     const edgeList = [];
     (deps || []).forEach((d) => {
       const pred = normId(getPredId(d));
       const succ = normId(getSuccId(d));
       if (!pred || !succ) return;
-      if (!taskMap.has(pred) || !taskMap.has(succ)) return;
+
+      if (!criticalIdSet.has(pred) || !criticalIdSet.has(succ)) return;
 
       const depId = getDepId(d);
       if (!Number.isFinite(Number(depId))) return;
@@ -2089,7 +2122,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 
     dagre.layout(g);
 
-    const nodeList = (tasks || []).map((t) => {
+    const nodeList = criticalTasks.map((t) => {
       const n = g.node(normId(t.TaskId));
       return { id: normId(t.TaskId), task: t, x: n?.x ?? 0, y: n?.y ?? 0, w: NODE_W, h: NODE_H };
     });
@@ -2110,15 +2143,18 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const gh = (g.graph().height || 600) + 80;
 
     return { nodes: nodeList, edges: edgeGeom, w: gw, h: gh };
-  }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [criticalTasks, deps, getPredId, getSuccId, getDepId, getLag, getType, criticalIdSet]);
 
-  if (!nodes.length) return null;
+  if (!nodes.length) {
+    const s = makeStyles();
+    return <div style={{ padding: 14, color: "#64748b", fontWeight: 900 }}>No critical path tasks to display.</div>;
+  }
+
   const s = makeStyles();
 
   return (
     <div style={{ padding: 14 }}>
-      <div style={s.note}>Nodes with orange border are critical tasks. Edges show type + lag.</div>
-
+      <div style={s.note}>Showing only Critical Path nodes + their internal dependencies.</div>
       <div style={{ overflow: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
           <defs>
@@ -2137,13 +2173,11 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
           ))}
 
           {nodes.map((n) => {
-            const isCrit = n.task.IsCritical === 1 || n.task.IsCritical === true;
             const x = n.x - n.w / 2;
             const y = n.y - n.h / 2;
-
             return (
               <g key={n.id}>
-                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill={isCrit ? "#fff7ed" : "#f8fafc"} stroke={isCrit ? "#f59e0b" : "#94a3b8"} strokeWidth={isCrit ? "3" : "2"} />
+                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill="#fff7ed" stroke="#f59e0b" strokeWidth="3" />
                 <text x={x + 10} y={y + 22} fontSize="12" fontWeight="700" fill="#111">
                   {n.task.TaskName}
                 </text>
@@ -2161,6 +2195,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     </div>
   );
 }
+
 
 /* =========================================================
    Date helpers
