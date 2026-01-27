@@ -364,13 +364,14 @@ export default function App() {
         projectId,
         predecessorTaskId,
         successorTaskId,
-        linkType, // backend may ignore (your sample hardcodes FS) but keep sending
+        linkType,
         lagDays,
       }),
     });
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
     return json;
   }
+
   async function updateDependencyApi({ taskDependencyId, linkType, lagDays }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
       method: "POST",
@@ -384,7 +385,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Update dependency failed");
     return json;
   }
-  
+
   async function deleteDependencyApi({ taskDependencyId }) {
     const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
       method: "POST",
@@ -394,6 +395,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
     return json;
   }
+
   async function createProject(payload) {
     const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
       method: "POST",
@@ -431,17 +433,14 @@ export default function App() {
   async function addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays }) {
     const pid = project?.ProjectId ?? projectId;
 
-    // basic
     if (!pid) throw new Error("Missing projectId");
     if (!predecessorTaskId || !successorTaskId) throw new Error("Predecessor and successor are required");
     if (String(predecessorTaskId) === String(successorTaskId)) throw new Error("A task cannot depend on itself");
 
-    // duplicate
     if (isDuplicateEdge(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Dependency already exists (duplicate blocked)");
     }
 
-    // cycle
     if (wouldCreateCycle(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Circular dependency detected. Operation blocked.");
     }
@@ -805,7 +804,7 @@ export default function App() {
             try {
               const out = await createProject({
                 projectName,
-                templateName: FIXED_TEMPLATE_NAME, // applied silently
+                templateName: FIXED_TEMPLATE_NAME,
                 bufferDays: BUFFER_DAYS_FIXED,
                 loiDate,
                 commissioningContractDate,
@@ -1108,8 +1107,6 @@ function Field({ label, required, hint, children }) {
   );
 }
 
-/* -------------------- Task Table (per-task Add Dependency only) -------------------- */
-/* -------------------- Task Table (GROUPED) -------------------- */
 /* -------------------- Task Table (GROUPED + Virtualized via react-virtualized) -------------------- */
 function TaskTable({
   tasks,
@@ -1124,7 +1121,6 @@ function TaskTable({
 }) {
   const s = makeStyles();
 
-  // -------- group config (Workstream -> part1 -> part2) ----------
   function splitParts(taskName) {
     const raw = String(taskName || "").trim();
     if (!raw) return ["(Unnamed)"];
@@ -1145,7 +1141,6 @@ function TaskTable({
       return parent.children.get(id);
     }
 
-    // Step 1: Workstream -> Part-1, collect raw p2 buckets
     for (const t of tasksList || []) {
       const tid = normalizeId(t.TaskId);
       if (!tid) continue;
@@ -1162,13 +1157,11 @@ function TaskTable({
       p1Node._raw.push({ tid, p2: (parts[1] || "").trim() });
     }
 
-    // Step 2: decide part-2 grouping only when it’s meaningful
     for (const wsNode of root.children.values()) {
       for (const p1Node of wsNode.children.values()) {
         const raw = p1Node._raw || [];
         const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
 
-        // if only one unique p2 (or none), skip p2 level
         if (p2Set.size <= 1) {
           p1Node.taskIds = raw.map((x) => x.tid);
           delete p1Node._raw;
@@ -1184,7 +1177,6 @@ function TaskTable({
       }
     }
 
-    // Step 3: aggregates bottom-up
     function computeAgg(node) {
       let durSum = 0;
       let minES = null;
@@ -1225,7 +1217,6 @@ function TaskTable({
 
   const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]);
 
-  // expanded state
   const [expanded, setExpanded] = useState(() => new Set());
   const toggle = (nodeId) => {
     setExpanded((prev) => {
@@ -1250,7 +1241,6 @@ function TaskTable({
 
   const collapseAll = () => setExpanded(new Set());
 
-  // flatten visible rows
   const flatRows = useMemo(() => {
     const out = [];
 
@@ -1270,7 +1260,6 @@ function TaskTable({
       }
     }
 
-    // Workstream priority ordering
     const wsNodes = Array.from(root.children.values());
     const WS_PRIORITY = ["INPUT", "DESIGN"];
     wsNodes.sort((a, b) => {
@@ -1287,11 +1276,9 @@ function TaskTable({
     return out;
   }, [root, taskById, expanded]);
 
-  // row heights (must match content)
   const GROUP_H = 52;
   const ROW_H = 92;
 
-  // keep it stable (react-virtualized likes stable container size)
   const LIST_H = Math.max(420, Math.min(760, (typeof window !== "undefined" ? window.innerHeight : 900) - 320));
 
   return (
@@ -1304,7 +1291,6 @@ function TaskTable({
         </div>
       </div>
 
-      {/* Header */}
       <div
         style={{
           display: "grid",
@@ -1333,7 +1319,6 @@ function TaskTable({
         ))}
       </div>
 
-      {/* Body */}
       <div style={{ border: "1px solid #e5eaf0", borderRadius: 12, overflow: "hidden", marginTop: 10, background: "#fff" }}>
         <div style={{ height: LIST_H }}>
           <AutoSizer>
@@ -1582,7 +1567,6 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
       }));
   }, [depPairs, succ]);
 
-  // add-new controls
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
@@ -1594,16 +1578,10 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
   const dup = pred && isDuplicateEdge(depPairs, pred, succ);
   const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
 
-  const canAdd =
-    !disabled &&
-    pred &&
-    normalizeId(pred) !== succ &&
-    !dup &&
-    !cyc;
+  const canAdd = !disabled && pred && normalizeId(pred) !== succ && !dup && !cyc;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {/* Existing */}
       <div style={s.depListBox}>
         <div style={s.depListTitle}>Predecessors</div>
 
@@ -1626,7 +1604,6 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
         )}
       </div>
 
-      {/* Add */}
       <div style={s.perTaskDepWrap}>
         <div style={s.perTaskDepTitle}>Add</div>
 
@@ -1765,8 +1742,6 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   );
 }
 
-
-
 /* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
 function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskClick, onDragLink }) {
   const s = makeStyles();
@@ -1812,7 +1787,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
-  // geometry map for hit testing (drop target)
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
@@ -1835,7 +1809,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return m;
   }, [valid, HEADER_H, ROW_H, BAR_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
-  // normalize edges pred->succ
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
@@ -1905,7 +1878,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   }
 
   function findDropTarget(x, y) {
-    // must drop on a bar region (not just row)
     for (const [id, g] of geom.entries()) {
       if (x >= g.xStart && x <= g.xEnd && y >= g.barTop && y <= g.barBottom) {
         return id;
@@ -1926,10 +1898,8 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
         const toId = findDropTarget(x, y);
 
         if (toId && toId !== cur.fromId) {
-          // UI-level quick checks before calling handler (extra safety)
           if (isDuplicateEdge(depPairs || [], cur.fromId, toId)) return null;
           if (wouldCreateCycle(depPairs || [], cur.fromId, toId)) return null;
-
           onDragLink?.(Number(cur.fromId), Number(toId));
         }
         return null;
@@ -1943,16 +1913,11 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
       <div style={{ overflowX: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
-        <div
-          ref={containerRef}
-          style={{ position: "relative", width: canvasW, height: canvasH }}
-        >
-          {/* left header */}
+        <div ref={containerRef} style={{ position: "relative", width: canvasW, height: canvasH }}>
           <div style={{ position: "absolute", left: 0, top: 0, width: LEFT_COL_W, height: HEADER_H, ...s.ganttHeader }}>
             Task
           </div>
 
-          {/* timeline header */}
           <div style={{ position: "absolute", left: LEFT_COL_W, top: 0, width: timelineW, height: HEADER_H, ...s.ganttHeader }}>
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
               if (i % tickStep !== 0) return null;
@@ -1981,7 +1946,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
-          {/* ROWS */}
           <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 2 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
@@ -1993,14 +1957,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               const barLeft = (t.ES - minStart) * PX_PER_DAY;
 
               return (
-                <div
-                  key={normalizeId(t.TaskId)}
-                  style={{
-                    display: "flex",
-                    height: ROW_H,
-                    borderBottom: "1px solid #eef2f7",
-                  }}
-                >
+                <div key={normalizeId(t.TaskId)} style={{ display: "flex", height: ROW_H, borderBottom: "1px solid #eef2f7" }}>
                   <div style={{ width: LEFT_COL_W, padding: "6px 10px", overflow: "hidden" }}>
                     <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {t.TaskName}
@@ -2035,7 +1992,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
-          {/* SVG overlay for dependency connectors */}
           <svg
             width={canvasW}
             height={canvasH}
@@ -2073,28 +2029,21 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               );
             })}
 
-            {/* Drag preview line */}
             {drag && (
-              <>
-                <path
-                  d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
-                  fill="none"
-                  stroke="#0f172a"
-                  strokeWidth="1.8"
-                  opacity="0.65"
-                  markerEnd="url(#arrowGantt)"
-                />
-              </>
+              <path
+                d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
+                fill="none"
+                stroke="#0f172a"
+                strokeWidth="1.8"
+                opacity="0.65"
+                markerEnd="url(#arrowGantt)"
+              />
             )}
           </svg>
         </div>
       </div>
 
-      {!compact && (
-        <div style={s.note}>
-          Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.
-        </div>
-      )}
+      {!compact && <div style={s.note}>Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.</div>}
     </div>
   );
 }
@@ -2103,7 +2052,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
 
-  // ✅ keep only critical tasks
   const criticalTasks = useMemo(() => {
     return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true);
   }, [tasks]);
@@ -2120,16 +2068,13 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    // ✅ nodes: critical only
     for (const t of criticalTasks) g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
 
-    // ✅ edges: only between critical nodes
     const edgeList = [];
     (deps || []).forEach((d) => {
       const pred = normId(getPredId(d));
       const succ = normId(getSuccId(d));
       if (!pred || !succ) return;
-
       if (!criticalIdSet.has(pred) || !criticalIdSet.has(succ)) return;
 
       const depId = getDepId(d);
@@ -2224,7 +2169,6 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
   );
 }
 
-
 /* =========================================================
    Date helpers
    ========================================================= */
@@ -2241,7 +2185,7 @@ function toISO(d) {
 }
 
 /* =========================================================
-   Styles
+   Styles  ✅ FIXED: no duplicate keys
    ========================================================= */
 function makeStyles() {
   const pageBg = "#f6f8fb";
@@ -2412,21 +2356,6 @@ function makeStyles() {
     listMeta: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 2 },
     muted: { color: sub, fontWeight: 800 },
 
-    table: { width: "100%", borderCollapse: "separate", borderSpacing: 0, fontSize: 13 },
-    th: {
-      textAlign: "left",
-      padding: "10px 10px",
-      background: "#f1f5f9",
-      borderBottom: `1px solid ${border}`,
-      fontWeight: 950,
-      color: text,
-      whiteSpace: "nowrap",
-      position: "sticky",
-      top: 0,
-      zIndex: 1,
-    },
-    td: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text },
-    tdMono: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
     tdInput: { width: 72, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
 
     smallBtnDark: {
@@ -2439,7 +2368,15 @@ function makeStyles() {
       cursor: "pointer",
     },
 
-    ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 950, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
+    ganttHeader: {
+      display: "flex",
+      alignItems: "center",
+      paddingLeft: 10,
+      fontWeight: 950,
+      color: "#334155",
+      background: "#fff",
+      borderBottom: `1px solid ${border}`,
+    },
 
     note: { marginTop: 10, fontSize: 12, color: sub, fontWeight: 800 },
 
@@ -2536,19 +2473,9 @@ function makeStyles() {
       background: "#fff",
     },
 
-    relHeaderCard: {
-      background: "#f8fafc",
-      border: "1px solid #e5eaf0",
-      borderRadius: 14,
-      padding: 12,
-    },
+    relHeaderCard: { background: "#f8fafc", border: "1px solid #e5eaf0", borderRadius: 14, padding: 12 },
     relMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900, marginTop: 6 },
-    relCard: {
-      background: "#ffffff",
-      border: "1px solid #e5eaf0",
-      borderRadius: 14,
-      padding: 12,
-    },
+    relCard: { background: "#ffffff", border: "1px solid #e5eaf0", borderRadius: 14, padding: 12 },
     relTitle: { fontWeight: 950 },
     relSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4, marginBottom: 10 },
     relRow: { padding: "10px 10px", border: "1px solid #eef2f7", borderRadius: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 },
@@ -2558,7 +2485,6 @@ function makeStyles() {
     sectionTitle: { fontWeight: 950, fontSize: 14 },
     sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
 
-    // per-task add dep
     perTaskDepWrap: {
       display: "flex",
       alignItems: "center",
@@ -2594,30 +2520,9 @@ function makeStyles() {
       outline: "none",
     },
     depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
-    depListBox: {
-      border: "1px solid #e5eaf0",
-      borderRadius: 12,
-      padding: 10,
-      background: "#fff",
-    },
+    depListBox: { border: "1px solid #e5eaf0", borderRadius: 12, padding: 10, background: "#fff" },
     depListTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginBottom: 8 },
-    
-    depRow: {
-      display: "grid",
-      gridTemplateColumns: "1fr 90px 90px 80px 80px",
-      gap: 8,
-      alignItems: "center",
-      border: "1px solid #eef2f7",
-      borderRadius: 12,
-      padding: "8px 10px",
-      background: "#fff",
-    },
-    depPred: {
-      fontWeight: 900,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-    },
+
     typeSelectSmall: {
       width: 90,
       padding: "6px 8px",
@@ -2642,79 +2547,49 @@ function makeStyles() {
       fontWeight: 950,
       cursor: "pointer",
     },
-    depRow2: {
-  display: "grid",
-  gridTemplateColumns: "1fr 90px 90px 80px 80px",
-  gap: 8,
-  alignItems: "center",
-  border: "1px solid #eef2f7",
-  borderRadius: 12,
-  padding: "10px 10px",
-  background: "#fff",
-},
 
-depFromTo: {
-  display: "flex",
-  flexDirection: "column",
-  gap: 6,
-  minWidth: 0,
-},
-
-depLine: {
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 0,
-  minWidth: 0,
-},
-
-depTag: {
-  fontSize: 10,
-  fontWeight: 950,
-  padding: "2px 8px",
-  borderRadius: 999,
-  background: "#f1f5f9",
-  border: "1px solid #e5eaf0",
-  color: "#334155",
-  flex: "0 0 auto",
-},
-
-depText: {
-  fontWeight: 900,
-  color: "#0f172a",
-  whiteSpace: "normal",     // ✅ allow wrap
-  overflow: "visible",
-  lineHeight: 1.2,
-},
+    // ✅ table column layout (ONE place)
     ttCols: "420px 140px 140px 140px 110px 110px minmax(520px, 1fr)",
 
-depRow2: {
-  display: "grid",
-  gridTemplateColumns: "1fr 90px 90px 80px 80px",
-  gap: 8,
-  alignItems: "center",
-  border: "1px solid #eef2f7",
-  borderRadius: 12,
-  padding: "10px 10px",
-  background: "#fff",
-},
-depFromTo: {
-  display: "flex",
-  flexDirection: "column",
-  gap: 6,
-  minWidth: 0,
-},
-depLine: {
-  display: "flex",
-  alignItems: "flex-start",
-  minWidth: 0,
-},
-depText: {
-  fontWeight: 900,
-  color: "#0f172a",
-  whiteSpace: "normal",
-  overflow: "visible",
-  lineHeight: 1.2,
-},
-
+    // ✅ dep row styles (ONE place)
+    depRow2: {
+      display: "grid",
+      gridTemplateColumns: "1fr 90px 90px 80px 80px",
+      gap: 8,
+      alignItems: "center",
+      border: "1px solid #eef2f7",
+      borderRadius: 12,
+      padding: "10px 10px",
+      background: "#fff",
+    },
+    depFromTo: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      minWidth: 0,
+    },
+    depLine: {
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 0,
+      minWidth: 0,
+    },
+    depTag: {
+      fontSize: 10,
+      fontWeight: 950,
+      padding: "2px 8px",
+      borderRadius: 999,
+      background: "#f1f5f9",
+      border: "1px solid #e5eaf0",
+      color: "#334155",
+      flex: "0 0 auto",
+    },
+    depText: {
+      fontWeight: 900,
+      color: "#0f172a",
+      whiteSpace: "normal",
+      overflow: "visible",
+      lineHeight: 1.2,
+    },
   };
 }
