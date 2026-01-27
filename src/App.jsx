@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-import { FixedSizeList as List } from "react-window";
+import { List } from "react-virtualized";
+import AutoSizer from "react-virtualized-auto-sizer";
 
 /**
  * MSP Lite — App.jsx
@@ -1109,6 +1110,7 @@ function Field({ label, required, hint, children }) {
 
 /* -------------------- Task Table (per-task Add Dependency only) -------------------- */
 /* -------------------- Task Table (GROUPED) -------------------- */
+/* -------------------- Task Table (GROUPED + Virtualized via react-virtualized) -------------------- */
 function TaskTable({
   tasks,
   disabled,
@@ -1160,12 +1162,13 @@ function TaskTable({
       p1Node._raw.push({ tid, p2: (parts[1] || "").trim() });
     }
 
-    // Step 2: decide part-2 grouping
+    // Step 2: decide part-2 grouping only when it’s meaningful
     for (const wsNode of root.children.values()) {
       for (const p1Node of wsNode.children.values()) {
         const raw = p1Node._raw || [];
         const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
 
+        // if only one unique p2 (or none), skip p2 level
         if (p2Set.size <= 1) {
           p1Node.taskIds = raw.map((x) => x.tid);
           delete p1Node._raw;
@@ -1224,7 +1227,6 @@ function TaskTable({
 
   // expanded state
   const [expanded, setExpanded] = useState(() => new Set());
-
   const toggle = (nodeId) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1248,7 +1250,7 @@ function TaskTable({
 
   const collapseAll = () => setExpanded(new Set());
 
-  // flatten rows (group + task), but only those visible under expanded set
+  // flatten visible rows
   const flatRows = useMemo(() => {
     const out = [];
 
@@ -1260,7 +1262,6 @@ function TaskTable({
 
       const children = Array.from(node.children.values());
       children.sort((a, b) => String(a.label).localeCompare(String(b.label)));
-
       for (const child of children) pushNode(child);
 
       for (const tid of node.taskIds || []) {
@@ -1269,7 +1270,7 @@ function TaskTable({
       }
     }
 
-    // workstream ordering priority
+    // Workstream priority ordering
     const wsNodes = Array.from(root.children.values());
     const WS_PRIORITY = ["INPUT", "DESIGN"];
     wsNodes.sort((a, b) => {
@@ -1286,56 +1287,12 @@ function TaskTable({
     return out;
   }, [root, taskById, expanded]);
 
-  // virtual list sizing
-  const ROW_H = 92; // task rows are tall because of dependency UI; tune this if needed
+  // row heights (must match content)
   const GROUP_H = 52;
-  const HEADER_H = 44;
-  const LIST_H = Math.min(760, window.innerHeight - 320); // reasonable default
+  const ROW_H = 92;
 
-  // react-window requires a stable itemSize per row:
-  // Use VariableSizeList if you want different heights; but FixedSize is faster.
-  // We'll approximate by using a single row height and compact the content a bit.
-  const ITEM_H = 92;
-
-  // Row renderer
-  const Row = ({ index, style }) => {
-    const r = flatRows[index];
-
-    // react-window style includes absolute positioning; apply it to the row wrapper
-    if (!r) return null;
-
-    if (r.kind === "group") {
-      return (
-        <div style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-          <GroupRowVirtual
-            node={r.node}
-            expanded={expanded.has(r.node.id)}
-            onToggle={() => toggle(r.node.id)}
-            dayToDate={dayToDate}
-            fmtDDMMMYY={fmtDDMMMYY}
-            disabled={disabled}
-          />
-        </div>
-      );
-    }
-
-    return (
-      <div style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-        <TaskRowVirtual
-          task={r.task}
-          tasks={tasks}
-          depPairs={depPairs}
-          disabled={disabled}
-          dayToDate={dayToDate}
-          fmtDDMMMYY={fmtDDMMMYY}
-          onSaveDuration={onSaveDuration}
-          onAddDep={onAddDep}
-          onUpdateDep={onUpdateDep}
-          onDeleteDep={onDeleteDep}
-        />
-      </div>
-    );
-  };
+  // keep it stable (react-virtualized likes stable container size)
+  const LIST_H = Math.max(420, Math.min(760, (typeof window !== "undefined" ? window.innerHeight : 900) - 320));
 
   return (
     <div style={{ padding: 14 }}>
@@ -1347,7 +1304,7 @@ function TaskTable({
         </div>
       </div>
 
-      {/* Header (grid) */}
+      {/* Header */}
       <div
         style={{
           display: "grid",
@@ -1361,23 +1318,71 @@ function TaskTable({
           overflow: "hidden",
         }}
       >
-        {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map((h) => (
-          <div key={h} style={{ padding: "10px 10px", fontWeight: 950, borderRight: "1px solid #e5eaf0", whiteSpace: "nowrap" }}>
+        {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies"].map((h) => (
+          <div
+            key={h}
+            style={{
+              padding: "10px 10px",
+              fontWeight: 950,
+              borderRight: "1px solid #e5eaf0",
+              whiteSpace: "nowrap",
+            }}
+          >
             {h}
           </div>
         ))}
       </div>
 
-      {/* Virtualized body */}
+      {/* Body */}
       <div style={{ border: "1px solid #e5eaf0", borderRadius: 12, overflow: "hidden", marginTop: 10, background: "#fff" }}>
-        <List
-          height={LIST_H}
-          itemCount={flatRows.length}
-          itemSize={ITEM_H}
-          width={"100%"}
-        >
-          {Row}
-        </List>
+        <div style={{ height: LIST_H }}>
+          <AutoSizer>
+            {({ height, width }) => (
+              <List
+                width={width}
+                height={height}
+                rowCount={flatRows.length}
+                rowHeight={({ index }) => (flatRows[index]?.kind === "group" ? GROUP_H : ROW_H)}
+                rowRenderer={({ index, key, style }) => {
+                  const r = flatRows[index];
+                  if (!r) return null;
+
+                  if (r.kind === "group") {
+                    return (
+                      <div key={key} style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
+                        <GroupRowVirtual
+                          node={r.node}
+                          expanded={expanded.has(r.node.id)}
+                          onToggle={() => toggle(r.node.id)}
+                          dayToDate={dayToDate}
+                          fmtDDMMMYY={fmtDDMMMYY}
+                          disabled={disabled}
+                        />
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div key={key} style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
+                      <TaskRowVirtual
+                        task={r.task}
+                        tasks={tasks}
+                        depPairs={depPairs}
+                        disabled={disabled}
+                        dayToDate={dayToDate}
+                        fmtDDMMMYY={fmtDDMMMYY}
+                        onSaveDuration={onSaveDuration}
+                        onAddDep={onAddDep}
+                        onUpdateDep={onUpdateDep}
+                        onDeleteDep={onDeleteDep}
+                      />
+                    </div>
+                  );
+                }}
+              />
+            )}
+          </AutoSizer>
+        </div>
       </div>
 
       <div style={s.note}>
@@ -1388,9 +1393,8 @@ function TaskTable({
 }
 
 /* =========================================================
-   Virtual row components (div-grid cells)
+   Virtual row components
    ========================================================= */
-
 function Cell({ children, style }) {
   return (
     <div
@@ -1408,17 +1412,15 @@ function Cell({ children, style }) {
 }
 
 function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
-  const s = makeStyles();
+  const a = node.agg || { durSum: 0, minES: null, maxEF: null, count: 0 };
+  const start = a.minES == null ? null : dayToDate(a.minES);
+  const finish = a.maxEF == null ? null : dayToDate(a.maxEF);
 
   const hasChildren = node.children && node.children.size > 0;
   const hasTasks = (node.taskIds || []).length > 0;
   const canToggle = hasChildren || hasTasks;
 
-  const a = node.agg || { durSum: 0, minES: null, maxEF: null, count: 0 };
-  const start = a.minES == null ? null : dayToDate(a.minES);
-  const finish = a.maxEF == null ? null : dayToDate(a.maxEF);
-
-  const indentPx = 12 + node.depth * 16;
+  const indentPx = 10 + node.depth * 16;
 
   return (
     <>
@@ -1493,7 +1495,9 @@ function TaskRowVirtual({
     <>
       <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
         <div style={{ fontWeight: 800, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
-        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{task.TaskName ?? ""}</div>
+        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {task.TaskName ?? ""}
+        </div>
       </Cell>
 
       <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
@@ -1527,7 +1531,14 @@ function TaskRowVirtual({
         {task.TotalFloat ?? ""}
       </Cell>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>
+      <Cell
+        style={{
+          background: isCrit ? "#fff7ed" : "#fff",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontWeight: 950,
+          color: isCrit ? "#b45309" : "#0f172a",
+        }}
+      >
         {isCrit ? "YES" : ""}
       </Cell>
 
@@ -1546,16 +1557,7 @@ function TaskRowVirtual({
   );
 }
 
-
-function PerTaskDependencies({
-  tasks,
-  depPairs,
-  successorTaskId,
-  disabled,
-  onAdd,
-  onUpdateDep,
-  onDeleteDep,
-}) {
+function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd, onUpdateDep, onDeleteDep }) {
   const s = makeStyles();
   const succ = normalizeId(successorTaskId);
 
@@ -1566,8 +1568,9 @@ function PerTaskDependencies({
     });
     return m;
   }, [tasks]);
+
   const succLabel = taskLabelById.get(succ) || `TaskId ${succ}`;
-  // existing deps INTO this successor
+
   const existing = useMemo(() => {
     return (depPairs || [])
       .filter((e) => normalizeId(e.succId) === succ && Number.isFinite(Number(e.depId)))
@@ -1579,31 +1582,28 @@ function PerTaskDependencies({
       }));
   }, [depPairs, succ]);
 
-  // Add-new controls
+  // add-new controls
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
 
   const options = (tasks || [])
     .filter((t) => normalizeId(t.TaskId) !== succ)
-    .map((t) => ({
-      id: normalizeId(t.TaskId),
-      label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
-    }));
+    .map((t) => ({ id: normalizeId(t.TaskId), label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim() }));
+
+  const dup = pred && isDuplicateEdge(depPairs, pred, succ);
+  const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
 
   const canAdd =
     !disabled &&
     pred &&
     normalizeId(pred) !== succ &&
-    !isDuplicateEdge(depPairs, pred, succ) &&
-    !wouldCreateCycle(depPairs, pred, succ);
-
-  const dup = pred && isDuplicateEdge(depPairs, pred, succ);
-  const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
+    !dup &&
+    !cyc;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {/* Existing dependencies list */}
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* Existing */}
       <div style={s.depListBox}>
         <div style={s.depListTitle}>Predecessors</div>
 
@@ -1626,16 +1626,11 @@ function PerTaskDependencies({
         )}
       </div>
 
-      {/* Add new dependency */}
+      {/* Add */}
       <div style={s.perTaskDepWrap}>
-        <div style={s.perTaskDepTitle}>Add Dependency</div>
+        <div style={s.perTaskDepTitle}>Add</div>
 
-        <select
-          value={pred}
-          onChange={(e) => setPred(e.target.value)}
-          disabled={disabled}
-          style={s.addDepSelect}
-        >
+        <select value={pred} onChange={(e) => setPred(e.target.value)} disabled={disabled} style={s.addDepSelect}>
           <option value="">Predecessor Task</option>
           {options.map((x) => (
             <option key={x.id} value={x.id}>
@@ -1678,7 +1673,11 @@ function PerTaskDependencies({
           Add
         </button>
 
-        {(dup || cyc) && <div style={s.depInlineWarn}>{dup ? "Duplicate blocked." : "Cycle blocked."}</div>}
+        {(dup || cyc) && (
+          <div style={s.depInlineWarn}>
+            {dup ? "Duplicate blocked." : "Cycle blocked."}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1703,10 +1702,10 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   return (
     <div style={s.depRow2}>
       <div style={s.depFromTo}>
-        <div style={s.depLine} title={fromLabel}>
+        <div style={s.depLine} title={`${fromLabel} → ${toLabel}`}>
           <span style={s.depText}>{fromLabel}</span>
         </div>
-      
+
         {!hasId && (
           <div style={s.depInlineWarn}>
             Missing TaskDependencyId from API. Update/Delete disabled.
@@ -1765,6 +1764,7 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
     </div>
   );
 }
+
 
 
 /* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
@@ -2685,6 +2685,36 @@ depText: {
   overflow: "visible",
   lineHeight: 1.2,
 },
-ttCols: "420px 140px 140px 140px 110px 110px minmax(520px, 1fr)",
+    ttCols: "420px 140px 140px 140px 110px 110px minmax(520px, 1fr)",
+
+depRow2: {
+  display: "grid",
+  gridTemplateColumns: "1fr 90px 90px 80px 80px",
+  gap: 8,
+  alignItems: "center",
+  border: "1px solid #eef2f7",
+  borderRadius: 12,
+  padding: "10px 10px",
+  background: "#fff",
+},
+depFromTo: {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  minWidth: 0,
+},
+depLine: {
+  display: "flex",
+  alignItems: "flex-start",
+  minWidth: 0,
+},
+depText: {
+  fontWeight: 900,
+  color: "#0f172a",
+  whiteSpace: "normal",
+  overflow: "visible",
+  lineHeight: 1.2,
+},
+
   };
 }
