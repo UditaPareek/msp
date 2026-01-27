@@ -1130,10 +1130,9 @@ function TaskTable({
 
   function buildTree(tasksList) {
     const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
-
+    const getTid = (t) => t?.TaskId ?? t?.TaskID ?? t?.taskId ?? t?.id;
     const taskById = new Map();
-    (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
-
+    (tasksList || []).forEach((t) => taskById.set(normalizeId(getTid(t)), t));
     function getOrCreate(parent, id, label, depth) {
       if (!parent.children.has(id)) {
         parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
@@ -1142,7 +1141,7 @@ function TaskTable({
     }
 
     for (const t of tasksList || []) {
-      const tid = normalizeId(t.TaskId);
+      const tid = normalizeId(getTid(t));
       if (!tid) continue;
 
       const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
