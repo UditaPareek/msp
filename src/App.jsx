@@ -1274,8 +1274,8 @@ function TaskTable({
     return out;
   }, [root, taskById, expanded]);
 
-  const GROUP_H = 52;
-  const ROW_H = 92;
+  const GROUP_H = 70;
+  const ROW_H = 200;
 
   const LIST_H = Math.max(420, Math.min(760, (typeof window !== "undefined" ? window.innerHeight : 900) - 320));
 
