@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-import { List } from "react-virtualized";
-import { AutoSizer } from "react-virtualized-auto-sizer";
+import { List, AutoSizer } from "react-virtualized";
 
 /**
  * MSP Lite — App.jsx
