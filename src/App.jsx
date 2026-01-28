@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-import { List, AutoSizer } from "react-virtualized";
 
 /**
  * MSP Lite — App.jsx
@@ -363,14 +362,13 @@ export default function App() {
         projectId,
         predecessorTaskId,
         successorTaskId,
-        linkType,
+        linkType, // backend may ignore (your sample hardcodes FS) but keep sending
         lagDays,
       }),
     });
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
     return json;
   }
-
   async function updateDependencyApi({ taskDependencyId, linkType, lagDays }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
       method: "POST",
@@ -384,7 +382,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Update dependency failed");
     return json;
   }
-
+  
   async function deleteDependencyApi({ taskDependencyId }) {
     const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
       method: "POST",
@@ -394,7 +392,6 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
     return json;
   }
-
   async function createProject(payload) {
     const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
       method: "POST",
@@ -432,14 +429,17 @@ export default function App() {
   async function addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays }) {
     const pid = project?.ProjectId ?? projectId;
 
+    // basic
     if (!pid) throw new Error("Missing projectId");
     if (!predecessorTaskId || !successorTaskId) throw new Error("Predecessor and successor are required");
     if (String(predecessorTaskId) === String(successorTaskId)) throw new Error("A task cannot depend on itself");
 
+    // duplicate
     if (isDuplicateEdge(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Dependency already exists (duplicate blocked)");
     }
 
+    // cycle
     if (wouldCreateCycle(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Circular dependency detected. Operation blocked.");
     }
@@ -796,32 +796,34 @@ export default function App() {
           bufferDays={BUFFER_DAYS_FIXED}
           onClose={() => setShowNewProject(false)}
           loading={loading}
-          onCreate={async ({ projectName, milestones, commissioningInternalDate }) => {
-  setError("");
-  setLoading(true);
-  setBusyMsg("Creating project...");
-  try {
-    const out = await createProject({
-      projectName,
-      templateName: FIXED_TEMPLATE_NAME,   // fixed template
-      bufferDays: BUFFER_DAYS_FIXED,       // fixed 30
-      milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate }, // ✅ backend reads only milestones
-    });
+          onCreate={async ({ projectName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
+            setError("");
+            setLoading(true);
+            setBusyMsg("Creating project...");
+            try {
+              const out = await createProject({
+                projectName,
+                templateName: FIXED_TEMPLATE_NAME, // applied silently
+                bufferDays: BUFFER_DAYS_FIXED,
+                loiDate,
+                commissioningContractDate,
+                commissioningInternalDate,
+                milestones,
+              });
 
-    const newId = String(out.projectId);
-    await recalcOnly(newId);
-    setProjectId(newId);
-    setShowNewProject(false);
-    await loadAll(newId);
-    setActiveTab("dashboard");
-  } catch (e) {
-    setError(e.message || String(e));
-  } finally {
-    setBusyMsg("");
-    setLoading(false);
-  }
-}}
-
+              const newId = String(out.projectId);
+              await recalcOnly(newId);
+              setProjectId(newId);
+              setShowNewProject(false);
+              await loadAll(newId);
+              setActiveTab("dashboard");
+            } catch (e) {
+              setError(e.message || String(e));
+            } finally {
+              setBusyMsg("");
+              setLoading(false);
+            }
+          }}
         />
       )}
 
@@ -1068,10 +1070,12 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
             disabled={!canSubmit || loading}
             onClick={() => {
               onCreate({
-  projectName: projectName.trim(),
-  milestones,
-  commissioningInternalDate,
-});
+                projectName: projectName.trim(),
+                milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate },
+                loiDate,
+                commissioningContractDate: commContract,
+                commissioningInternalDate,
+              });
             }}
           >
             {loading ? (
@@ -1102,7 +1106,8 @@ function Field({ label, required, hint, children }) {
   );
 }
 
-/* -------------------- Task Table (GROUPED + Virtualized via react-virtualized) -------------------- */
+/* -------------------- Task Table (per-task Add Dependency only) -------------------- */
+/* -------------------- Task Table (GROUPED) -------------------- */
 function TaskTable({
   tasks,
   disabled,
@@ -1116,18 +1121,24 @@ function TaskTable({
 }) {
   const s = makeStyles();
 
+  // -------- group config (Workstream -> part1 -> part2 -> part3) ----------
   function splitParts(taskName) {
     const raw = String(taskName || "").trim();
     if (!raw) return ["(Unnamed)"];
+    // split strictly on " - " (not partial hyphen)
     const parts = raw.split(" - ").map((x) => x.trim()).filter(Boolean);
+    // use up to 3 parts for grouping
     return parts.length ? parts.slice(0, 3) : [raw];
   }
 
+  // Node structure:
+  // { id, label, depth, children: Map, taskIds: [], agg: {durSum, minES, maxEF, count} }
   function buildTree(tasksList) {
     const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
-    const getTid = (t) => t?.TaskId ?? t?.TaskID ?? t?.taskId ?? t?.id;
+
     const taskById = new Map();
-    (tasksList || []).forEach((t) => taskById.set(normalizeId(getTid(t)), t));
+    (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
+
     function getOrCreate(parent, id, label, depth) {
       if (!parent.children.has(id)) {
         parent.children.set(id, { id, label, depth, children: new Map(), taskIds: [], agg: null });
@@ -1136,7 +1147,7 @@ function TaskTable({
     }
 
     for (const t of tasksList || []) {
-      const tid = normalizeId(getTid(t));
+      const tid = normalizeId(t.TaskId);
       if (!tid) continue;
 
       const ws = String(t.Workstream || "(No Workstream)").trim() || "(No Workstream)";
@@ -1147,36 +1158,34 @@ function TaskTable({
       const p1 = parts[0] || "(No Part-1)";
       const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
 
-      if (!p1Node._raw) p1Node._raw = [];
-      p1Node._raw.push({ tid, p2: (parts[1] || "").trim() });
-    }
-
-    for (const wsNode of root.children.values()) {
-      for (const p1Node of wsNode.children.values()) {
-        const raw = p1Node._raw || [];
-        const p2Set = new Set(raw.map((x) => x.p2).filter(Boolean));
-
-        if (p2Set.size <= 1) {
-          p1Node.taskIds = raw.map((x) => x.tid);
-          delete p1Node._raw;
-          continue;
-        }
-
-        for (const x of raw) {
-          const p2Label = x.p2 || "(No Part-2)";
-          const p2Node = getOrCreate(p1Node, `P2:${wsNode.label}::${p1Node.label}::${p2Label}`, p2Label, 2);
-          p2Node.taskIds.push(x.tid);
-        }
-        delete p1Node._raw;
+      // if only 1 part -> task attaches here
+      if (!parts[1]) {
+        p1Node.taskIds.push(tid);
+        continue;
       }
+
+      const p2 = parts[1];
+      const p2Node = getOrCreate(p1Node, `P2:${ws}::${p1}::${p2}`, p2, 2);
+
+      // if only 2 parts -> task attaches here
+      if (!parts[2]) {
+        p2Node.taskIds.push(tid);
+        continue;
+      }
+
+      const p3 = parts[2];
+      const p3Node = getOrCreate(p2Node, `P3:${ws}::${p1}::${p2}::${p3}`, p3, 3);
+      p3Node.taskIds.push(tid);
     }
 
+    // compute aggregates bottom-up
     function computeAgg(node) {
       let durSum = 0;
       let minES = null;
       let maxEF = null;
       let count = 0;
 
+      // tasks directly in this node
       for (const tid of node.taskIds || []) {
         const t = taskById.get(tid);
         if (!t) continue;
@@ -1192,9 +1201,11 @@ function TaskTable({
         count += 1;
       }
 
+      // children aggregates
       for (const child of node.children.values()) {
         const a = computeAgg(child);
         if (!a) continue;
+
         durSum += a.durSum;
         if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
         if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
@@ -1204,14 +1215,17 @@ function TaskTable({
       node.agg = { durSum, minES, maxEF, count };
       return node.agg;
     }
-
     computeAgg(root);
+
     return { root, taskById };
   }
 
-  const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]);
+  const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // expanded state: default collapsed (only show Workstream groups)
   const [expanded, setExpanded] = useState(() => new Set());
+
+  // helpers
   const toggle = (nodeId) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1235,176 +1249,136 @@ function TaskTable({
 
   const collapseAll = () => setExpanded(new Set());
 
+  // flatten tree into table rows
   const flatRows = useMemo(() => {
     const out = [];
 
-    function pushNode(node) {
-      if (node.depth >= 0) out.push({ kind: "group", node });
+    function pushGroup(node) {
+      // skip ROOT
+      if (node.depth >= 0) {
+        out.push({ kind: "group", node });
+      }
 
       const isOpen = node.depth < 0 ? true : expanded.has(node.id);
       if (!isOpen) return;
 
-      const children = Array.from(node.children.values());
-      children.sort((a, b) => String(a.label).localeCompare(String(b.label)));
-      for (const child of children) pushNode(child);
+      // children first (so structure is visible)
+      for (const child of node.children.values()) {
+        pushGroup(child);
+      }
 
+      // then tasks directly under this group
       for (const tid of node.taskIds || []) {
         const t = taskById.get(tid);
         if (t) out.push({ kind: "task", task: t });
       }
     }
 
-    const wsNodes = Array.from(root.children.values());
-    const WS_PRIORITY = ["INPUT", "DESIGN"];
-    wsNodes.sort((a, b) => {
-      const A = String(a.label || "").toUpperCase();
-      const B = String(b.label || "").toUpperCase();
-      const ia = WS_PRIORITY.indexOf(A);
-      const ib = WS_PRIORITY.indexOf(B);
-      if (ia !== -1 || ib !== -1) return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-      return A.localeCompare(B);
-    });
-
-    for (const wsNode of wsNodes) pushNode(wsNode);
+    // show all workstreams as first-level groups
+    for (const wsNode of root.children.values()) {
+      pushGroup(wsNode);
+    }
 
     return out;
   }, [root, taskById, expanded]);
 
-  const GROUP_H = 70;
-  const ROW_H = 200;
-
-  const LIST_H = Math.max(420, Math.min(760, (typeof window !== "undefined" ? window.innerHeight : 900) - 320));
-
   return (
-    <div style={{ padding: 14 }}>
+    <div style={{ padding: 14, overflowX: "auto" }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={s.btn} onClick={expandAll} disabled={disabled}>Expand All</button>
-        <button style={s.btn} onClick={collapseAll} disabled={disabled}>Collapse All</button>
-        <div style={{ marginLeft: 8, color: "#64748b", fontWeight: 900, fontSize: 12 }}>
-          Rows: {flatRows.length}
+        <button style={s.btn} onClick={expandAll} disabled={disabled}>
+          Expand All
+        </button>
+        <button style={s.btn} onClick={collapseAll} disabled={disabled}>
+          Collapse All
+        </button>
+        <div style={s.note}>
+          Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>). Group rows show
+          aggregated dates + duration. Expand to edit individual tasks.
         </div>
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: s.ttCols,
-          position: "sticky",
-          top: 0,
-          zIndex: 5,
-          background: "#f1f5f9",
-          border: "1px solid #e5eaf0",
-          borderRadius: 12,
-          overflow: "hidden",
-        }}
-      >
-        {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies"].map((h) => (
-          <div
-            key={h}
-            style={{
-              padding: "10px 10px",
-              fontWeight: 950,
-              borderRight: "1px solid #e5eaf0",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {h}
-          </div>
-        ))}
-      </div>
-
-      <div style={{ border: "1px solid #e5eaf0", borderRadius: 12, overflow: "hidden", marginTop: 10, background: "#fff" }}>
-        <div style={{ height: LIST_H }}>
-          <AutoSizer>
-            {({ height, width }) => (
-              <List
-                width={width}
-                height={height}
-                rowCount={flatRows.length}
-                rowHeight={({ index }) => (flatRows[index]?.kind === "group" ? GROUP_H : ROW_H)}
-                rowRenderer={({ index, key, style }) => {
-                  const r = flatRows[index];
-                  if (!r) return null;
-
-                  if (r.kind === "group") {
-                    return (
-                      <div key={key} style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-                        <GroupRowVirtual
-                          node={r.node}
-                          expanded={expanded.has(r.node.id)}
-                          onToggle={() => toggle(r.node.id)}
-                          dayToDate={dayToDate}
-                          fmtDDMMMYY={fmtDDMMMYY}
-                          disabled={disabled}
-                        />
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div key={key} style={{ ...style, display: "grid", gridTemplateColumns: s.ttCols, alignItems: "stretch" }}>
-                      <TaskRowVirtual
-                        task={r.task}
-                        tasks={tasks}
-                        depPairs={depPairs}
-                        disabled={disabled}
-                        dayToDate={dayToDate}
-                        fmtDDMMMYY={fmtDDMMMYY}
-                        onSaveDuration={onSaveDuration}
-                        onAddDep={onAddDep}
-                        onUpdateDep={onUpdateDep}
-                        onDeleteDep={onDeleteDep}
-                      />
-                    </div>
-                  );
-                }}
-              />
+      <table style={s.table}>
+        <thead>
+          <tr>
+            {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map(
+              (h) => (
+                <th key={h} style={s.th}>
+                  {h}
+                </th>
+              )
             )}
-          </AutoSizer>
-        </div>
-      </div>
+          </tr>
+        </thead>
+
+        <tbody>
+          {flatRows.map((r, idx) => {
+            if (r.kind === "group") {
+              return (
+                <GroupRow
+                  key={r.node.id}
+                  node={r.node}
+                  expanded={expanded.has(r.node.id)}
+                  onToggle={() => toggle(r.node.id)}
+                  dayToDate={dayToDate}
+                  fmtDDMMMYY={fmtDDMMMYY}
+                  disabled={disabled}
+                />
+              );
+            }
+
+            // task row (FULL columns)
+            return (
+              <TaskRow
+                key={normalizeId(r.task.TaskId)}
+                rowIndex={idx}
+                task={r.task}
+                tasks={tasks}
+                depPairs={depPairs}
+                disabled={disabled}
+                dayToDate={dayToDate}
+                fmtDDMMMYY={fmtDDMMMYY}
+                onSaveDuration={onSaveDuration}
+                onAddDep={onAddDep}
+                onUpdateDep={onUpdateDep}
+                onDeleteDep={onDeleteDep}
+              />
+            );
+          })}
+
+          {!tasks?.length && (
+            <tr>
+              <td colSpan={7} style={{ padding: 14, color: "#475569" }}>
+                No tasks found.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
 
       <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Group rows aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
+        Dates shown are Target Dates (LOI + ES/EF). Group rows are aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
       </div>
     </div>
   );
 }
 
-/* =========================================================
-   Virtual row components
-   ========================================================= */
-function Cell({ children, style }) {
-  return (
-    <div
-      style={{
-        padding: "10px 10px",
-        borderBottom: "1px solid #eef2f7",
-        borderRight: "1px solid #eef2f7",
-        overflow: "hidden",
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
-  const a = node.agg || { durSum: 0, minES: null, maxEF: null, count: 0 };
-  const start = a.minES == null ? null : dayToDate(a.minES);
-  const finish = a.maxEF == null ? null : dayToDate(a.maxEF);
+function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
+  const s = makeStyles();
 
   const hasChildren = node.children && node.children.size > 0;
   const hasTasks = (node.taskIds || []).length > 0;
   const canToggle = hasChildren || hasTasks;
 
-  const indentPx = 10 + node.depth * 16;
+  const a = node.agg || { durSum: 0, minES: null, maxEF: null, count: 0 };
+  const start = a.minES == null ? null : dayToDate(a.minES);
+  const finish = a.maxEF == null ? null : dayToDate(a.maxEF);
+
+  const indentPx = 12 + node.depth * 16;
 
   return (
-    <>
-      <Cell style={{ background: "#f1f5f9", fontWeight: 950 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx, minWidth: 0 }}>
+    <tr style={{ background: "#f1f5f9" }}>
+      <td style={{ ...s.td, fontWeight: 950 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx }}>
           <button
             type="button"
             onClick={onToggle}
@@ -1417,7 +1391,6 @@ function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disa
               background: "#fff",
               cursor: disabled || !canToggle ? "not-allowed" : "pointer",
               fontWeight: 950,
-              flex: "0 0 auto",
             }}
             title={canToggle ? "Expand/Collapse" : "No children"}
           >
@@ -1430,26 +1403,24 @@ function GroupRowVirtual({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disa
             </div>
           </div>
         </div>
-      </Cell>
+      </td>
 
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {Number.isFinite(Number(a.durSum)) ? a.durSum : ""}
-      </Cell>
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {start ? fmtDDMMMYY(start) : ""}
-      </Cell>
-      <Cell style={{ background: "#f1f5f9", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {finish ? fmtDDMMMYY(finish) : ""}
-      </Cell>
+      {/* Group row: ONLY Dur + Target Start/Finish */}
+      <td style={s.tdMono}>{Number.isFinite(Number(a.durSum)) ? a.durSum : ""}</td>
+      <td style={s.tdMono}>{start ? fmtDDMMMYY(start) : ""}</td>
+      <td style={s.tdMono}>{finish ? fmtDDMMMYY(finish) : ""}</td>
 
-      <Cell style={{ background: "#f1f5f9" }} />
-      <Cell style={{ background: "#f1f5f9" }} />
-      <Cell style={{ background: "#f1f5f9" }} />
-    </>
+      {/* No Float/Critical/Deps at group level */}
+      <td style={s.tdMono}></td>
+      <td style={s.tdMono}></td>
+      <td style={s.td}></td>
+    </tr>
   );
 }
 
-function TaskRowVirtual({
+/* -------------------- Individual Task Row (UNCHANGED behavior) -------------------- */
+function TaskRow({
+  rowIndex,
   task,
   tasks,
   depPairs,
@@ -1471,15 +1442,15 @@ function TaskRowVirtual({
   const finishDt = dayToDate(task.EF);
 
   return (
-    <>
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+    <tr style={{ background: isCrit ? "#fff7ed" : rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
+      {/* Workstream / Task */}
+      <td style={s.td}>
         <div style={{ fontWeight: 800, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
-        <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {task.TaskName ?? ""}
-        </div>
-      </Cell>
+        <div style={{ fontWeight: 950 }}>{task.TaskName ?? ""}</div>
+      </td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+      {/* Dur + Save */}
+      <td style={s.td}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
             style={s.tdInput}
@@ -1497,31 +1468,18 @@ function TaskRowVirtual({
             Save
           </button>
         </div>
-      </Cell>
+      </td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {fmtDDMMMYY(startDt)}
-      </Cell>
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {fmtDDMMMYY(finishDt)}
-      </Cell>
+      {/* Target Start/Finish */}
+      <td style={s.tdMono}>{fmtDDMMMYY(startDt)}</td>
+      <td style={s.tdMono}>{fmtDDMMMYY(finishDt)}</td>
 
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-        {task.TotalFloat ?? ""}
-      </Cell>
+      {/* Float/Critical */}
+      <td style={s.tdMono}>{task.TotalFloat ?? ""}</td>
+      <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
-      <Cell
-        style={{
-          background: isCrit ? "#fff7ed" : "#fff",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          fontWeight: 950,
-          color: isCrit ? "#b45309" : "#0f172a",
-        }}
-      >
-        {isCrit ? "YES" : ""}
-      </Cell>
-
-      <Cell style={{ background: isCrit ? "#fff7ed" : "#fff" }}>
+      {/* Dependencies */}
+      <td style={{ ...s.td, minWidth: 520 }}>
         <PerTaskDependencies
           tasks={tasks}
           depPairs={depPairs}
@@ -1531,12 +1489,20 @@ function TaskRowVirtual({
           onUpdateDep={onUpdateDep}
           onDeleteDep={onDeleteDep}
         />
-      </Cell>
-    </>
+      </td>
+    </tr>
   );
 }
 
-function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd, onUpdateDep, onDeleteDep }) {
+function PerTaskDependencies({
+  tasks,
+  depPairs,
+  successorTaskId,
+  disabled,
+  onAdd,
+  onUpdateDep,
+  onDeleteDep,
+}) {
   const s = makeStyles();
   const succ = normalizeId(successorTaskId);
 
@@ -1547,9 +1513,8 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
     });
     return m;
   }, [tasks]);
-
   const succLabel = taskLabelById.get(succ) || `TaskId ${succ}`;
-
+  // existing deps INTO this successor
   const existing = useMemo(() => {
     return (depPairs || [])
       .filter((e) => normalizeId(e.succId) === succ && Number.isFinite(Number(e.depId)))
@@ -1561,21 +1526,31 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
       }));
   }, [depPairs, succ]);
 
+  // Add-new controls
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
 
   const options = (tasks || [])
     .filter((t) => normalizeId(t.TaskId) !== succ)
-    .map((t) => ({ id: normalizeId(t.TaskId), label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim() }));
+    .map((t) => ({
+      id: normalizeId(t.TaskId),
+      label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
+    }));
+
+  const canAdd =
+    !disabled &&
+    pred &&
+    normalizeId(pred) !== succ &&
+    !isDuplicateEdge(depPairs, pred, succ) &&
+    !wouldCreateCycle(depPairs, pred, succ);
 
   const dup = pred && isDuplicateEdge(depPairs, pred, succ);
   const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
 
-  const canAdd = !disabled && pred && normalizeId(pred) !== succ && !dup && !cyc;
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Existing dependencies list */}
       <div style={s.depListBox}>
         <div style={s.depListTitle}>Predecessors</div>
 
@@ -1598,10 +1573,16 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
         )}
       </div>
 
+      {/* Add new dependency */}
       <div style={s.perTaskDepWrap}>
-        <div style={s.perTaskDepTitle}>Add</div>
+        <div style={s.perTaskDepTitle}>Add Dependency</div>
 
-        <select value={pred} onChange={(e) => setPred(e.target.value)} disabled={disabled} style={s.addDepSelect}>
+        <select
+          value={pred}
+          onChange={(e) => setPred(e.target.value)}
+          disabled={disabled}
+          style={s.addDepSelect}
+        >
           <option value="">Predecessor Task</option>
           {options.map((x) => (
             <option key={x.id} value={x.id}>
@@ -1644,11 +1625,7 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
           Add
         </button>
 
-        {(dup || cyc) && (
-          <div style={s.depInlineWarn}>
-            {dup ? "Duplicate blocked." : "Cycle blocked."}
-          </div>
-        )}
+        {(dup || cyc) && <div style={s.depInlineWarn}>{dup ? "Duplicate blocked." : "Cycle blocked."}</div>}
       </div>
     </div>
   );
@@ -1673,10 +1650,10 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   return (
     <div style={s.depRow2}>
       <div style={s.depFromTo}>
-        <div style={s.depLine} title={`${fromLabel} → ${toLabel}`}>
+        <div style={s.depLine} title={fromLabel}>
           <span style={s.depText}>{fromLabel}</span>
         </div>
-
+      
         {!hasId && (
           <div style={s.depInlineWarn}>
             Missing TaskDependencyId from API. Update/Delete disabled.
@@ -1736,6 +1713,7 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   );
 }
 
+
 /* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
 function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskClick, onDragLink }) {
   const s = makeStyles();
@@ -1781,6 +1759,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
+  // geometry map for hit testing (drop target)
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
@@ -1803,6 +1782,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return m;
   }, [valid, HEADER_H, ROW_H, BAR_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
+  // normalize edges pred->succ
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
@@ -1872,6 +1852,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   }
 
   function findDropTarget(x, y) {
+    // must drop on a bar region (not just row)
     for (const [id, g] of geom.entries()) {
       if (x >= g.xStart && x <= g.xEnd && y >= g.barTop && y <= g.barBottom) {
         return id;
@@ -1892,8 +1873,10 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
         const toId = findDropTarget(x, y);
 
         if (toId && toId !== cur.fromId) {
+          // UI-level quick checks before calling handler (extra safety)
           if (isDuplicateEdge(depPairs || [], cur.fromId, toId)) return null;
           if (wouldCreateCycle(depPairs || [], cur.fromId, toId)) return null;
+
           onDragLink?.(Number(cur.fromId), Number(toId));
         }
         return null;
@@ -1907,11 +1890,16 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
       <div style={{ overflowX: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
-        <div ref={containerRef} style={{ position: "relative", width: canvasW, height: canvasH }}>
+        <div
+          ref={containerRef}
+          style={{ position: "relative", width: canvasW, height: canvasH }}
+        >
+          {/* left header */}
           <div style={{ position: "absolute", left: 0, top: 0, width: LEFT_COL_W, height: HEADER_H, ...s.ganttHeader }}>
             Task
           </div>
 
+          {/* timeline header */}
           <div style={{ position: "absolute", left: LEFT_COL_W, top: 0, width: timelineW, height: HEADER_H, ...s.ganttHeader }}>
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
               if (i % tickStep !== 0) return null;
@@ -1940,6 +1928,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
+          {/* ROWS */}
           <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 2 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
@@ -1951,7 +1940,14 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               const barLeft = (t.ES - minStart) * PX_PER_DAY;
 
               return (
-                <div key={normalizeId(t.TaskId)} style={{ display: "flex", height: ROW_H, borderBottom: "1px solid #eef2f7" }}>
+                <div
+                  key={normalizeId(t.TaskId)}
+                  style={{
+                    display: "flex",
+                    height: ROW_H,
+                    borderBottom: "1px solid #eef2f7",
+                  }}
+                >
                   <div style={{ width: LEFT_COL_W, padding: "6px 10px", overflow: "hidden" }}>
                     <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {t.TaskName}
@@ -1986,6 +1982,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
+          {/* SVG overlay for dependency connectors */}
           <svg
             width={canvasW}
             height={canvasH}
@@ -2023,21 +2020,28 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               );
             })}
 
+            {/* Drag preview line */}
             {drag && (
-              <path
-                d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
-                fill="none"
-                stroke="#0f172a"
-                strokeWidth="1.8"
-                opacity="0.65"
-                markerEnd="url(#arrowGantt)"
-              />
+              <>
+                <path
+                  d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
+                  fill="none"
+                  stroke="#0f172a"
+                  strokeWidth="1.8"
+                  opacity="0.65"
+                  markerEnd="url(#arrowGantt)"
+                />
+              </>
             )}
           </svg>
         </div>
       </div>
 
-      {!compact && <div style={s.note}>Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.</div>}
+      {!compact && (
+        <div style={s.note}>
+          Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.
+        </div>
+      )}
     </div>
   );
 }
@@ -2045,14 +2049,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 /* -------------------- Network Diagram -------------------- */
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
-
-  const criticalTasks = useMemo(() => {
-    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true);
-  }, [tasks]);
-
-  const criticalIdSet = useMemo(() => {
-    return new Set(criticalTasks.map((t) => normId(t.TaskId)));
-  }, [criticalTasks]);
 
   const { nodes, edges, w, h } = useMemo(() => {
     const g = new dagre.graphlib.Graph();
@@ -2062,14 +2058,18 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    for (const t of criticalTasks) g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
+    const taskMap = new Map((tasks || []).map((t) => [normId(t.TaskId), t]));
+
+    for (const t of tasks || []) {
+      g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
+    }
 
     const edgeList = [];
     (deps || []).forEach((d) => {
       const pred = normId(getPredId(d));
       const succ = normId(getSuccId(d));
       if (!pred || !succ) return;
-      if (!criticalIdSet.has(pred) || !criticalIdSet.has(succ)) return;
+      if (!taskMap.has(pred) || !taskMap.has(succ)) return;
 
       const depId = getDepId(d);
       if (!Number.isFinite(Number(depId))) return;
@@ -2089,7 +2089,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 
     dagre.layout(g);
 
-    const nodeList = criticalTasks.map((t) => {
+    const nodeList = (tasks || []).map((t) => {
       const n = g.node(normId(t.TaskId));
       return { id: normId(t.TaskId), task: t, x: n?.x ?? 0, y: n?.y ?? 0, w: NODE_W, h: NODE_H };
     });
@@ -2110,18 +2110,15 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const gh = (g.graph().height || 600) + 80;
 
     return { nodes: nodeList, edges: edgeGeom, w: gw, h: gh };
-  }, [criticalTasks, deps, getPredId, getSuccId, getDepId, getLag, getType, criticalIdSet]);
+  }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!nodes.length) {
-    const s = makeStyles();
-    return <div style={{ padding: 14, color: "#64748b", fontWeight: 900 }}>No critical path tasks to display.</div>;
-  }
-
+  if (!nodes.length) return null;
   const s = makeStyles();
 
   return (
     <div style={{ padding: 14 }}>
-      <div style={s.note}>Showing only Critical Path nodes + their internal dependencies.</div>
+      <div style={s.note}>Nodes with orange border are critical tasks. Edges show type + lag.</div>
+
       <div style={{ overflow: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
           <defs>
@@ -2140,11 +2137,13 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
           ))}
 
           {nodes.map((n) => {
+            const isCrit = n.task.IsCritical === 1 || n.task.IsCritical === true;
             const x = n.x - n.w / 2;
             const y = n.y - n.h / 2;
+
             return (
               <g key={n.id}>
-                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill="#fff7ed" stroke="#f59e0b" strokeWidth="3" />
+                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill={isCrit ? "#fff7ed" : "#f8fafc"} stroke={isCrit ? "#f59e0b" : "#94a3b8"} strokeWidth={isCrit ? "3" : "2"} />
                 <text x={x + 10} y={y + 22} fontSize="12" fontWeight="700" fill="#111">
                   {n.task.TaskName}
                 </text>
@@ -2179,7 +2178,7 @@ function toISO(d) {
 }
 
 /* =========================================================
-   Styles  ✅ FIXED: no duplicate keys
+   Styles
    ========================================================= */
 function makeStyles() {
   const pageBg = "#f6f8fb";
@@ -2350,6 +2349,21 @@ function makeStyles() {
     listMeta: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 2 },
     muted: { color: sub, fontWeight: 800 },
 
+    table: { width: "100%", borderCollapse: "separate", borderSpacing: 0, fontSize: 13 },
+    th: {
+      textAlign: "left",
+      padding: "10px 10px",
+      background: "#f1f5f9",
+      borderBottom: `1px solid ${border}`,
+      fontWeight: 950,
+      color: text,
+      whiteSpace: "nowrap",
+      position: "sticky",
+      top: 0,
+      zIndex: 1,
+    },
+    td: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text },
+    tdMono: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
     tdInput: { width: 72, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
 
     smallBtnDark: {
@@ -2362,15 +2376,7 @@ function makeStyles() {
       cursor: "pointer",
     },
 
-    ganttHeader: {
-      display: "flex",
-      alignItems: "center",
-      paddingLeft: 10,
-      fontWeight: 950,
-      color: "#334155",
-      background: "#fff",
-      borderBottom: `1px solid ${border}`,
-    },
+    ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 950, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
 
     note: { marginTop: 10, fontSize: 12, color: sub, fontWeight: 800 },
 
@@ -2467,9 +2473,19 @@ function makeStyles() {
       background: "#fff",
     },
 
-    relHeaderCard: { background: "#f8fafc", border: "1px solid #e5eaf0", borderRadius: 14, padding: 12 },
+    relHeaderCard: {
+      background: "#f8fafc",
+      border: "1px solid #e5eaf0",
+      borderRadius: 14,
+      padding: 12,
+    },
     relMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900, marginTop: 6 },
-    relCard: { background: "#ffffff", border: "1px solid #e5eaf0", borderRadius: 14, padding: 12 },
+    relCard: {
+      background: "#ffffff",
+      border: "1px solid #e5eaf0",
+      borderRadius: 14,
+      padding: 12,
+    },
     relTitle: { fontWeight: 950 },
     relSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4, marginBottom: 10 },
     relRow: { padding: "10px 10px", border: "1px solid #eef2f7", borderRadius: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 },
@@ -2479,6 +2495,7 @@ function makeStyles() {
     sectionTitle: { fontWeight: 950, fontSize: 14 },
     sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
 
+    // per-task add dep
     perTaskDepWrap: {
       display: "flex",
       alignItems: "center",
@@ -2514,9 +2531,30 @@ function makeStyles() {
       outline: "none",
     },
     depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
-    depListBox: { border: "1px solid #e5eaf0", borderRadius: 12, padding: 10, background: "#fff" },
+    depListBox: {
+      border: "1px solid #e5eaf0",
+      borderRadius: 12,
+      padding: 10,
+      background: "#fff",
+    },
     depListTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginBottom: 8 },
-
+    
+    depRow: {
+      display: "grid",
+      gridTemplateColumns: "1fr 90px 90px 80px 80px",
+      gap: 8,
+      alignItems: "center",
+      border: "1px solid #eef2f7",
+      borderRadius: 12,
+      padding: "8px 10px",
+      background: "#fff",
+    },
+    depPred: {
+      fontWeight: 900,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+    },
     typeSelectSmall: {
       width: 90,
       padding: "6px 8px",
@@ -2541,49 +2579,49 @@ function makeStyles() {
       fontWeight: 950,
       cursor: "pointer",
     },
-
-    // ✅ table column layout (ONE place)
-    ttCols: "420px 140px 140px 140px 110px 110px minmax(520px, 1fr)",
-
-    // ✅ dep row styles (ONE place)
     depRow2: {
-      display: "grid",
-      gridTemplateColumns: "1fr 90px 90px 80px 80px",
-      gap: 8,
-      alignItems: "center",
-      border: "1px solid #eef2f7",
-      borderRadius: 12,
-      padding: "10px 10px",
-      background: "#fff",
-    },
-    depFromTo: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 6,
-      minWidth: 0,
-    },
-    depLine: {
-      display: "flex",
-      alignItems: "flex-start",
-      gap: 0,
-      minWidth: 0,
-    },
-    depTag: {
-      fontSize: 10,
-      fontWeight: 950,
-      padding: "2px 8px",
-      borderRadius: 999,
-      background: "#f1f5f9",
-      border: "1px solid #e5eaf0",
-      color: "#334155",
-      flex: "0 0 auto",
-    },
-    depText: {
-      fontWeight: 900,
-      color: "#0f172a",
-      whiteSpace: "normal",
-      overflow: "visible",
-      lineHeight: 1.2,
-    },
+  display: "grid",
+  gridTemplateColumns: "1fr 90px 90px 80px 80px",
+  gap: 8,
+  alignItems: "center",
+  border: "1px solid #eef2f7",
+  borderRadius: 12,
+  padding: "10px 10px",
+  background: "#fff",
+},
+
+depFromTo: {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  minWidth: 0,
+},
+
+depLine: {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 0,
+  minWidth: 0,
+},
+
+depTag: {
+  fontSize: 10,
+  fontWeight: 950,
+  padding: "2px 8px",
+  borderRadius: 999,
+  background: "#f1f5f9",
+  border: "1px solid #e5eaf0",
+  color: "#334155",
+  flex: "0 0 auto",
+},
+
+depText: {
+  fontWeight: 900,
+  color: "#0f172a",
+  whiteSpace: "normal",     // ✅ allow wrap
+  overflow: "visible",
+  lineHeight: 1.2,
+},
+
   };
-}
+}  
