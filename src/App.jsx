@@ -796,34 +796,32 @@ export default function App() {
           bufferDays={BUFFER_DAYS_FIXED}
           onClose={() => setShowNewProject(false)}
           loading={loading}
-          onCreate={async ({ projectName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
-            setError("");
-            setLoading(true);
-            setBusyMsg("Creating project...");
-            try {
-              const out = await createProject({
-                projectName,
-                templateName: FIXED_TEMPLATE_NAME,
-                bufferDays: BUFFER_DAYS_FIXED,
-                loiDate,
-                commissioningContractDate,
-                commissioningInternalDate,
-                milestones,
-              });
+          onCreate={async ({ projectName, milestones, commissioningInternalDate }) => {
+  setError("");
+  setLoading(true);
+  setBusyMsg("Creating project...");
+  try {
+    const out = await createProject({
+      projectName,
+      templateName: FIXED_TEMPLATE_NAME,   // fixed template
+      bufferDays: BUFFER_DAYS_FIXED,       // fixed 30
+      milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate }, // ✅ backend reads only milestones
+    });
 
-              const newId = String(out.projectId);
-              await recalcOnly(newId);
-              setProjectId(newId);
-              setShowNewProject(false);
-              await loadAll(newId);
-              setActiveTab("dashboard");
-            } catch (e) {
-              setError(e.message || String(e));
-            } finally {
-              setBusyMsg("");
-              setLoading(false);
-            }
-          }}
+    const newId = String(out.projectId);
+    await recalcOnly(newId);
+    setProjectId(newId);
+    setShowNewProject(false);
+    await loadAll(newId);
+    setActiveTab("dashboard");
+  } catch (e) {
+    setError(e.message || String(e));
+  } finally {
+    setBusyMsg("");
+    setLoading(false);
+  }
+}}
+
         />
       )}
 
@@ -1070,12 +1068,10 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
             disabled={!canSubmit || loading}
             onClick={() => {
               onCreate({
-                projectName: projectName.trim(),
-                milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate },
-                loiDate,
-                commissioningContractDate: commContract,
-                commissioningInternalDate,
-              });
+  projectName: projectName.trim(),
+  milestones,
+  commissioningInternalDate,
+});
             }}
           >
             {loading ? (
