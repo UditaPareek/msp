@@ -802,21 +802,36 @@ export default function App() {
             setBusyMsg("Creating project...");
             try {
               const out = await createProject({
-                projectName,
-                templateName: FIXED_TEMPLATE_NAME, // applied silently
-                bufferDays: BUFFER_DAYS_FIXED,
-                loiDate,
-                commissioningContractDate,
-                commissioningInternalDate,
-                milestones,
-              });
+  projectName,
+  templateName: FIXED_TEMPLATE_NAME,
+  bufferDays: BUFFER_DAYS_FIXED,
+  milestones,
+});
 
-              const newId = String(out.projectId);
-              await recalcOnly(newId);
-              setProjectId(newId);
-              setShowNewProject(false);
-              await loadAll(newId);
-              setActiveTab("dashboard");
+const newId = String(out.projectId);
+const jobId = String(out.jobId);
+
+setBusyMsg("Building project from template (3000 tasks)…");
+setProjectId(newId);
+
+// poll job status
+const start = Date.now();
+while (true) {
+  const { res, json } = await fetchJson(`${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`);
+  if (!res.ok || !json?.ok) throw new Error(json?.error || "Job status failed");
+
+  if (json.status === "DONE") break;
+  if (json.status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
+
+  // hard stop after 10 minutes (avoid infinite loop)
+  if (Date.now() - start > 10 * 60 * 1000) throw new Error("Build is taking too long. Check job status in DB.");
+
+  await new Promise((r) => setTimeout(r, 2500));
+}
+
+setShowNewProject(false);
+await loadAll(newId);
+setActiveTab("dashboard");
             } catch (e) {
               setError(e.message || String(e));
             } finally {
