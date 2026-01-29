@@ -2066,8 +2066,18 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 }
 
 /* -------------------- Network Diagram -------------------- */
+/* -------------------- Network Diagram -------------------- */
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
+
+  // ✅ keep only critical tasks
+  const criticalTasks = useMemo(() => {
+    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true);
+  }, [tasks]);
+
+  const criticalIdSet = useMemo(() => {
+    return new Set(criticalTasks.map((t) => normId(t.TaskId)));
+  }, [criticalTasks]);
 
   const { nodes, edges, w, h } = useMemo(() => {
     const g = new dagre.graphlib.Graph();
@@ -2077,18 +2087,17 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    const taskMap = new Map((tasks || []).map((t) => [normId(t.TaskId), t]));
+    // ✅ nodes: critical only
+    for (const t of criticalTasks) g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
 
-    for (const t of tasks || []) {
-      g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
-    }
-
+    // ✅ edges: only between critical nodes
     const edgeList = [];
     (deps || []).forEach((d) => {
       const pred = normId(getPredId(d));
       const succ = normId(getSuccId(d));
       if (!pred || !succ) return;
-      if (!taskMap.has(pred) || !taskMap.has(succ)) return;
+
+      if (!criticalIdSet.has(pred) || !criticalIdSet.has(succ)) return;
 
       const depId = getDepId(d);
       if (!Number.isFinite(Number(depId))) return;
@@ -2108,7 +2117,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 
     dagre.layout(g);
 
-    const nodeList = (tasks || []).map((t) => {
+    const nodeList = criticalTasks.map((t) => {
       const n = g.node(normId(t.TaskId));
       return { id: normId(t.TaskId), task: t, x: n?.x ?? 0, y: n?.y ?? 0, w: NODE_W, h: NODE_H };
     });
@@ -2129,15 +2138,18 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const gh = (g.graph().height || 600) + 80;
 
     return { nodes: nodeList, edges: edgeGeom, w: gw, h: gh };
-  }, [tasks, deps, getPredId, getSuccId, getDepId, getLag, getType]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [criticalTasks, deps, getPredId, getSuccId, getDepId, getLag, getType, criticalIdSet]);
 
-  if (!nodes.length) return null;
+  if (!nodes.length) {
+    const s = makeStyles();
+    return <div style={{ padding: 14, color: "#64748b", fontWeight: 900 }}>No critical path tasks to display.</div>;
+  }
+
   const s = makeStyles();
 
   return (
     <div style={{ padding: 14 }}>
-      <div style={s.note}>Nodes with orange border are critical tasks. Edges show type + lag.</div>
-
+      <div style={s.note}>Showing only Critical Path nodes + their internal dependencies.</div>
       <div style={{ overflow: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
           <defs>
@@ -2156,13 +2168,11 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
           ))}
 
           {nodes.map((n) => {
-            const isCrit = n.task.IsCritical === 1 || n.task.IsCritical === true;
             const x = n.x - n.w / 2;
             const y = n.y - n.h / 2;
-
             return (
               <g key={n.id}>
-                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill={isCrit ? "#fff7ed" : "#f8fafc"} stroke={isCrit ? "#f59e0b" : "#94a3b8"} strokeWidth={isCrit ? "3" : "2"} />
+                <rect x={x} y={y} width={n.w} height={n.h} rx="10" ry="10" fill="#fff7ed" stroke="#f59e0b" strokeWidth="3" />
                 <text x={x + 10} y={y + 22} fontSize="12" fontWeight="700" fill="#111">
                   {n.task.TaskName}
                 </text>
