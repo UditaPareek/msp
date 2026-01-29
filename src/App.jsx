@@ -820,8 +820,9 @@ while (true) {
   const { res, json } = await fetchJson(`${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`);
   if (!res.ok || !json?.ok) throw new Error(json?.error || "Job status failed");
 
-  if (json.status === "DONE") break;
-  if (json.status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
+  const status = String(json.status || "").toUpperCase();
+if (status === "DONE") break;
+if (status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
 
   // hard stop after 10 minutes (avoid infinite loop)
   if (Date.now() - start > 10 * 60 * 1000) throw new Error("Build is taking too long. Check job status in DB.");
@@ -830,6 +831,8 @@ while (true) {
 }
 
 setShowNewProject(false);
+setBusyMsg("Recalculating schedule...");
+await recalcOnly(newId);  
 await loadAll(newId);
 setActiveTab("dashboard");
             } catch (e) {
