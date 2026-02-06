@@ -3,14 +3,16 @@ import dagre from "dagre";
 import { API_BASE } from "./config";
 
 /**
- * MSP Lite — App.jsx
+ * MSP Lite — App.jsx (FULL)
  *
- * Implemented (as per your requirement):
- * 1) Task Table: ONLY per-task "Add Dependency" (task + link type + lag). No big dependency cards.
- * 2) Circular dependency prevention (UI-level DFS check) before POST /addDependency.
- * 3) Drag-to-link in Gantt (drag bar -> drop on another bar) creates FS+0 by default.
- * 4) New Project modal: template hidden (uses fixed template name silently).
- * 5) Gantt connectors stay visible (SVG above rows).
+ * Included:
+ * 1) Task Table: per-task dependency add + edit/delete existing deps
+ * 2) Circular dependency prevention (UI DFS) + duplicate prevention
+ * 3) Drag-to-link in Gantt (FS+0)
+ * 4) New Project modal (template hidden; buffer fixed)
+ * 5) Build job polling after createProject
+ * 6) Edit Optional Milestones AFTER project creation (updateProjectMilestones) + recalc+reload
+ * 7) Task relations popup (preds/succs)
  */
 
 const TABS = [
@@ -32,6 +34,7 @@ const MILESTONE_FIELDS = [
   { key: "GSS_END_SLD", label: "GSS End SLD" },
   { key: "LOCAL_APPROVAL_DWG", label: "Local State Approved Equipment Structure Drawing" },
   { key: "GSS_INPUTS_CHECKLIST", label: "Filled Checklist of GSS Inputs" },
+  { key: "GRID_STUDY", label: "Grid Study" },
   { key: "COMM_CONTRACT", label: "Commissioning (as per Contract)", required: true },
 ];
 
@@ -63,7 +66,7 @@ function wouldCreateCycle(depPairs, predId, succId) {
 
   const adj = buildAdjacency(depPairs);
 
-  // add the proposed edge
+  // add proposed edge
   if (!adj.has(P)) adj.set(P, []);
   adj.get(P).push(S);
 
@@ -103,6 +106,7 @@ export default function App() {
   const [deps, setDeps] = useState([]);
 
   const [showNewProject, setShowNewProject] = useState(false);
+  const [showEditMilestones, setShowEditMilestones] = useState(false);
 
   // Task popup (from click)
   const [selectedTaskId, setSelectedTaskId] = useState(null);
@@ -125,8 +129,6 @@ export default function App() {
   const project = schedule?.project ?? null;
 
   /* -------------------- dependency field tolerance -------------------- */
-  // getDependencies returns:
-  // TaskDependencyId, ProjectId, PredecessorTaskId, SuccessorTaskId, LinkType, LagDays
   const getPredId = (d) =>
     d.PredecessorTaskId ??
     d.PredecessorTaskID ??
@@ -230,8 +232,8 @@ export default function App() {
     }
 
     if (Array.isArray(project?.Milestones)) {
-      const loiRow = project.Milestones.find((x) => String(x?.Key || x?.key) === "LOI");
-      const loi = parseISO(loiRow?.Date || loiRow?.date || loiRow?.Value || loiRow?.value);
+      const loiRow = project.Milestones.find((x) => String(x?.MilestoneCode ?? x?.Key ?? x?.key) === "LOI");
+      const loi = parseISO(loiRow?.MilestoneDate ?? loiRow?.Date ?? loiRow?.date ?? loiRow?.Value ?? loiRow?.value);
       if (loi) return loi;
     }
 
@@ -257,6 +259,35 @@ export default function App() {
   }, [tasks]);
 
   const needsStartDate = tasks.length > 0 && !projectStartDate;
+
+  /* -------------------- milestone parsing for Edit Milestones modal -------------------- */
+  function anyToISODate(v) {
+    if (!v) return "";
+    const s = String(v).slice(0, 10);
+    const d = new Date(s + "T00:00:00");
+    if (isNaN(d.getTime())) return "";
+    return toISO(d);
+  }
+
+  const currentMilestones = useMemo(() => {
+    const out = {};
+    for (const f of MILESTONE_FIELDS) out[f.key] = "";
+
+    if (project?.milestones && typeof project.milestones === "object") {
+      for (const k of Object.keys(out)) out[k] = anyToISODate(project.milestones[k]);
+      return out;
+    }
+
+    if (Array.isArray(project?.Milestones)) {
+      for (const row of project.Milestones) {
+        const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim();
+        const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
+        if (code && code in out) out[code] = anyToISODate(dt);
+      }
+    }
+
+    return out;
+  }, [project]);
 
   /* -------------------- fetch helpers -------------------- */
   async function safeJson(res) {
@@ -362,13 +393,14 @@ export default function App() {
         projectId,
         predecessorTaskId,
         successorTaskId,
-        linkType, // backend may ignore (your sample hardcodes FS) but keep sending
+        linkType,
         lagDays,
       }),
     });
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Add dependency failed");
     return json;
   }
+
   async function updateDependencyApi({ taskDependencyId, linkType, lagDays }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateDependency?t=${Date.now()}`, {
       method: "POST",
@@ -382,7 +414,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Update dependency failed");
     return json;
   }
-  
+
   async function deleteDependencyApi({ taskDependencyId }) {
     const { res, json } = await fetchJson(`${API_BASE}/deleteDependency?t=${Date.now()}`, {
       method: "POST",
@@ -392,6 +424,7 @@ export default function App() {
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Delete dependency failed");
     return json;
   }
+
   async function createProject(payload) {
     const { res, json } = await fetchJson(`${API_BASE}/createProject?t=${Date.now()}`, {
       method: "POST",
@@ -399,6 +432,17 @@ export default function App() {
       body: JSON.stringify(payload),
     });
     if (!res.ok || !json?.ok) throw new Error(json?.error || "Create project failed");
+    return json;
+  }
+
+  // ✅ NEW: update optional milestones after project creation
+  async function updateProjectMilestonesApi({ projectId, milestones }) {
+    const { res, json } = await fetchJson(`${API_BASE}/updateProjectMilestones?t=${Date.now()}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, milestones }),
+    });
+    if (!res.ok || !json?.ok) throw new Error(json?.error || "Update milestones failed");
     return json;
   }
 
@@ -429,17 +473,14 @@ export default function App() {
   async function addDependencyGuarded({ predecessorTaskId, successorTaskId, linkType, lagDays }) {
     const pid = project?.ProjectId ?? projectId;
 
-    // basic
     if (!pid) throw new Error("Missing projectId");
     if (!predecessorTaskId || !successorTaskId) throw new Error("Predecessor and successor are required");
     if (String(predecessorTaskId) === String(successorTaskId)) throw new Error("A task cannot depend on itself");
 
-    // duplicate
     if (isDuplicateEdge(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Dependency already exists (duplicate blocked)");
     }
 
-    // cycle
     if (wouldCreateCycle(depPairs, predecessorTaskId, successorTaskId)) {
       throw new Error("Circular dependency detected. Operation blocked.");
     }
@@ -547,7 +588,11 @@ export default function App() {
               <input value={projectId} onChange={(e) => setProjectId(e.target.value)} style={s.input} disabled={loading} />
             </label>
 
-            <button onClick={() => loadAll(projectId)} disabled={loading} style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}>
+            <button
+              onClick={() => loadAll(projectId)}
+              disabled={loading}
+              style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}
+            >
               Load
             </button>
 
@@ -558,6 +603,16 @@ export default function App() {
               title="Recalculate (recommended after edits)"
             >
               Recalculate
+            </button>
+
+            {/* ✅ NEW: Edit Optional Milestones */}
+            <button
+              onClick={() => setShowEditMilestones(true)}
+              disabled={loading || !(project?.ProjectId ?? projectId)}
+              style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}
+              title="Update optional milestone dates for this project"
+            >
+              Edit Milestones
             </button>
           </div>
         </div>
@@ -590,7 +645,7 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.4fr", gap: 14, marginTop: 14 }}>
+            <div style={s.twoCol}>
               <div style={s.card}>
                 <div style={s.cardHeader}>
                   <div>
@@ -633,7 +688,7 @@ export default function App() {
                       .slice(0, 12)
                       .map((t) => (
                         <div key={normalizeId(t.TaskId)} style={s.listRow}>
-                          <div style={{ fontWeight: 950 }}>{t.TaskName}</div>
+                          <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
                           <div style={s.listMeta}>
                             {t.Workstream} • Start {fmtDDMMMYY(dayToDate(t.ES))} • Finish {fmtDDMMMYY(dayToDate(t.EF))}
                           </div>
@@ -658,9 +713,7 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Gantt (Target Dates + Connections)</div>
-                <div style={s.cardSub}>
-                  Drag-to-link enabled: drag bar → bar to add FS link (lag 0). Click bar for preds/succs.
-                </div>
+                <div style={s.cardSub}>Drag-to-link enabled: drag bar → bar to add FS link (lag 0).</div>
               </div>
             </div>
 
@@ -688,7 +741,7 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Network Diagram</div>
-                <div style={s.cardSub}>DAG layout using Dagre. Edges labelled type + lag.</div>
+                <div style={s.cardSub}>DAG layout using Dagre. Showing critical-only nodes (fast).</div>
               </div>
             </div>
 
@@ -714,9 +767,7 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Task Table (Edit Duration / Add Dependencies)</div>
-                <div style={s.cardSub}>
-                  Per task: choose predecessor + link type + lag, then Add. (Circular + duplicate blocked)
-                </div>
+                <div style={s.cardSub}>Per task: choose predecessor + link type + lag. (Circular + duplicate blocked)</div>
               </div>
 
               <div style={s.cardHeaderRight}>
@@ -796,45 +847,70 @@ export default function App() {
           bufferDays={BUFFER_DAYS_FIXED}
           onClose={() => setShowNewProject(false)}
           loading={loading}
-          onCreate={async ({ projectName, milestones, loiDate, commissioningContractDate, commissioningInternalDate }) => {
+          onCreate={async ({ projectName, milestones }) => {
             setError("");
             setLoading(true);
             setBusyMsg("Creating project...");
             try {
               const out = await createProject({
-  projectName,
-  templateName: FIXED_TEMPLATE_NAME,
-  bufferDays: BUFFER_DAYS_FIXED,
-  milestones,
-});
+                projectName,
+                templateName: FIXED_TEMPLATE_NAME,
+                bufferDays: BUFFER_DAYS_FIXED,
+                milestones,
+              });
 
-const newId = String(out.projectId);
-const jobId = String(out.jobId);
+              const newId = String(out.projectId);
+              const jobId = String(out.jobId);
 
-setBusyMsg("Building project from template (3000 tasks)…");
-setProjectId(newId);
+              setBusyMsg("Building project from template (3000 tasks)…");
+              setProjectId(newId);
 
-// poll job status
-const start = Date.now();
-while (true) {
-  const { res, json } = await fetchJson(`${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`);
-  if (!res.ok || !json?.ok) throw new Error(json?.error || "Job status failed");
+              // poll job status
+              const start = Date.now();
+              while (true) {
+                const { res, json } = await fetchJson(`${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`);
+                if (!res.ok || !json?.ok) throw new Error(json?.error || "Job status failed");
 
-  const status = String(json.status || "").toUpperCase();
-if (status === "DONE") break;
-if (status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
+                const status = String(json.status || "").toUpperCase();
+                if (status === "DONE") break;
+                if (status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
 
-  // hard stop after 10 minutes (avoid infinite loop)
-  if (Date.now() - start > 10 * 60 * 1000) throw new Error("Build is taking too long. Check job status in DB.");
+                if (Date.now() - start > 10 * 60 * 1000) throw new Error("Build is taking too long. Check job status in DB.");
 
-  await new Promise((r) => setTimeout(r, 2500));
-}
+                await new Promise((r) => setTimeout(r, 2500));
+              }
 
-setShowNewProject(false);
-setBusyMsg("Recalculating schedule...");
-await recalcOnly(newId);  
-await loadAll(newId);
-setActiveTab("dashboard");
+              setShowNewProject(false);
+              setBusyMsg("Recalculating schedule...");
+              await recalcOnly(newId);
+              await loadAll(newId);
+              setActiveTab("dashboard");
+            } catch (e) {
+              setError(e.message || String(e));
+            } finally {
+              setBusyMsg("");
+              setLoading(false);
+            }
+          }}
+        />
+      )}
+
+      {/* ✅ Edit Optional Milestones Modal */}
+      {showEditMilestones && (
+        <EditMilestonesModal
+          loading={loading}
+          bufferDays={BUFFER_DAYS_FIXED}
+          initial={currentMilestones}
+          onClose={() => setShowEditMilestones(false)}
+          onSave={async (milestonesPatch) => {
+            setError("");
+            setLoading(true);
+            setBusyMsg("Updating milestones...");
+            try {
+              const pid = Number(project?.ProjectId ?? projectId);
+              await updateProjectMilestonesApi({ projectId: pid, milestones: milestonesPatch });
+              setShowEditMilestones(false);
+              await recalcAndReload(String(pid)); // ✅ mandatory
             } catch (e) {
               setError(e.message || String(e));
             } finally {
@@ -864,15 +940,11 @@ setActiveTab("dashboard");
 /* =========================================================
    Components
    ========================================================= */
-
 function GlobalCSS() {
   return (
     <style>{`
       * { box-sizing: border-box; }
       button, input, select { font-family: inherit; }
-      ::-webkit-scrollbar { height: 10px; width: 10px; }
-      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 12px; }
-      ::-webkit-scrollbar-track { background: #eef2f7; }
       @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     `}</style>
   );
@@ -907,7 +979,7 @@ function KpiCard({ label, value }) {
 
 function EmptyState({ text }) {
   const s = makeStyles();
-  return <div style={{ padding: 14, color: "#475569", fontWeight: 900 }}>{text}</div>;
+  return <div style={{ padding: 14, color: "#475569", fontWeight: 800 }}>{text}</div>;
 }
 
 /* -------------------- Task Relations Modal -------------------- */
@@ -940,7 +1012,7 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
 
         <div style={s.modalBody}>
           <div style={s.relHeaderCard}>
-            <div style={{ fontWeight: 950, fontSize: 16 }}>{task.TaskName}</div>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>{task.TaskName}</div>
             <div style={s.relMeta}>
               <span><b>Workstream:</b> {task.Workstream || "-"}</span>
               <span>•</span>
@@ -952,7 +1024,7 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+          <div style={s.relGrid}>
             <div style={s.relCard}>
               <div style={s.relTitle}>Predecessors</div>
               <div style={s.relSub}>Edges going into this task.</div>
@@ -1090,9 +1162,6 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
               onCreate({
                 projectName: projectName.trim(),
                 milestones: { ...milestones, COMM_INTERNAL: commissioningInternalDate },
-                loiDate,
-                commissioningContractDate: commContract,
-                commissioningInternalDate,
               });
             }}
           >
@@ -1103,6 +1172,97 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
             ) : (
               "Create Project"
             )}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------- Edit Optional Milestones Modal (after creation) -------------------- */
+function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) {
+  const s = makeStyles();
+  const OPTIONAL_FIELDS = MILESTONE_FIELDS.filter((f) => !f.required);
+
+  const [vals, setVals] = useState(() => {
+    const o = {};
+    for (const f of OPTIONAL_FIELDS) o[f.key] = initial?.[f.key] || "";
+    return o;
+  });
+
+  // keep in sync if project changes while modal open
+  useEffect(() => {
+    const o = {};
+    for (const f of OPTIONAL_FIELDS) o[f.key] = initial?.[f.key] || "";
+    setVals(o);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial?.LOI, initial?.COMM_CONTRACT]);
+
+  const commContract = initial?.COMM_CONTRACT || "";
+  const commissioningInternalDate = useMemo(() => {
+    const d = parseISO(commContract);
+    if (!d) return "";
+    const x = new Date(d.getTime());
+    x.setDate(x.getDate() - Number(bufferDays || 30));
+    return toISO(x);
+  }, [commContract, bufferDays]);
+
+  // PATCH: empty string => null (means clear/delete milestone)
+  const patch = useMemo(() => {
+    const p = {};
+    for (const f of OPTIONAL_FIELDS) {
+      const v = String(vals[f.key] || "").trim();
+      p[f.key] = v ? v : null;
+    }
+    return p;
+  }, [vals, OPTIONAL_FIELDS]);
+
+  return (
+    <div style={s.modalOverlay} onMouseDown={onClose}>
+      <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
+        <div style={s.modalHeader}>
+          <div>
+            <div style={s.modalTitle}>Edit Optional Milestones</div>
+            <div style={s.modalSub}>
+              Update optional milestone dates. Empty value will clear that milestone. Save triggers Recalculate.
+            </div>
+          </div>
+          <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
+        </div>
+
+        <div style={s.modalBody}>
+          <div style={s.sectionTitle}>Reference (read-only)</div>
+          <div style={s.sectionSub}>
+            LOI: <b>{initial?.LOI || "-"}</b> • Contract COD: <b>{initial?.COMM_CONTRACT || "-"}</b> • Internal COD:{" "}
+            <b>{commissioningInternalDate || "-"}</b>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <div style={s.sectionTitle}>Optional Milestones</div>
+            <div style={s.milestoneGrid}>
+              {OPTIONAL_FIELDS.map((f) => (
+                <Field key={f.key} label={f.label}>
+                  <input
+                    type="date"
+                    style={s.inputWide}
+                    value={vals[f.key] || ""}
+                    onChange={(e) => setVals((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    disabled={loading}
+                  />
+                </Field>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={s.modalFooter}>
+          <button style={s.btn} onClick={onClose} disabled={loading}>Cancel</button>
+          <button
+            style={{ ...s.btnPrimary, ...(loading ? s.btnDisabled : {}) }}
+            disabled={loading}
+            onClick={() => onSave(patch)}
+          >
+            Save Milestones
           </button>
         </div>
       </div>
@@ -1124,36 +1284,19 @@ function Field({ label, required, hint, children }) {
   );
 }
 
-/* -------------------- Task Table (per-task Add Dependency only) -------------------- */
 /* -------------------- Task Table (GROUPED) -------------------- */
-function TaskTable({
-  tasks,
-  disabled,
-  dayToDate,
-  fmtDDMMMYY,
-  depPairs,
-  onSaveDuration,
-  onAddDep,
-  onUpdateDep,
-  onDeleteDep,
-}) {
+function TaskTable({ tasks, disabled, dayToDate, fmtDDMMMYY, depPairs, onSaveDuration, onAddDep, onUpdateDep, onDeleteDep }) {
   const s = makeStyles();
 
-  // -------- group config (Workstream -> part1 -> part2 -> part3) ----------
   function splitParts(taskName) {
     const raw = String(taskName || "").trim();
     if (!raw) return ["(Unnamed)"];
-    // split strictly on " - " (not partial hyphen)
     const parts = raw.split(" - ").map((x) => x.trim()).filter(Boolean);
-    // use up to 3 parts for grouping
     return parts.length ? parts.slice(0, 3) : [raw];
   }
 
-  // Node structure:
-  // { id, label, depth, children: Map, taskIds: [], agg: {durSum, minES, maxEF, count} }
   function buildTree(tasksList) {
     const root = { id: "ROOT", label: "ROOT", depth: -1, children: new Map(), taskIds: [], agg: null };
-
     const taskById = new Map();
     (tasksList || []).forEach((t) => taskById.set(normalizeId(t.TaskId), t));
 
@@ -1172,11 +1315,9 @@ function TaskTable({
       const parts = splitParts(t.TaskName);
 
       const wsNode = getOrCreate(root, `WS:${ws}`, ws, 0);
-
       const p1 = parts[0] || "(No Part-1)";
       const p1Node = getOrCreate(wsNode, `P1:${ws}::${p1}`, p1, 1);
 
-      // if only 1 part -> task attaches here
       if (!parts[1]) {
         p1Node.taskIds.push(tid);
         continue;
@@ -1185,7 +1326,6 @@ function TaskTable({
       const p2 = parts[1];
       const p2Node = getOrCreate(p1Node, `P2:${ws}::${p1}::${p2}`, p2, 2);
 
-      // if only 2 parts -> task attaches here
       if (!parts[2]) {
         p2Node.taskIds.push(tid);
         continue;
@@ -1196,14 +1336,12 @@ function TaskTable({
       p3Node.taskIds.push(tid);
     }
 
-    // compute aggregates bottom-up
     function computeAgg(node) {
       let durSum = 0;
       let minES = null;
       let maxEF = null;
       let count = 0;
 
-      // tasks directly in this node
       for (const tid of node.taskIds || []) {
         const t = taskById.get(tid);
         if (!t) continue;
@@ -1219,11 +1357,9 @@ function TaskTable({
         count += 1;
       }
 
-      // children aggregates
       for (const child of node.children.values()) {
         const a = computeAgg(child);
         if (!a) continue;
-
         durSum += a.durSum;
         if (a.minES != null) minES = minES == null ? a.minES : Math.min(minES, a.minES);
         if (a.maxEF != null) maxEF = maxEF == null ? a.maxEF : Math.max(maxEF, a.maxEF);
@@ -1239,11 +1375,8 @@ function TaskTable({
   }
 
   const { root, taskById } = useMemo(() => buildTree(tasks), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // expanded state: default collapsed (only show Workstream groups)
   const [expanded, setExpanded] = useState(() => new Set());
 
-  // helpers
   const toggle = (nodeId) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -1267,64 +1400,41 @@ function TaskTable({
 
   const collapseAll = () => setExpanded(new Set());
 
-  // flatten tree into table rows
   const flatRows = useMemo(() => {
     const out = [];
 
     function pushGroup(node) {
-      // skip ROOT
-      if (node.depth >= 0) {
-        out.push({ kind: "group", node });
-      }
-
+      if (node.depth >= 0) out.push({ kind: "group", node });
       const isOpen = node.depth < 0 ? true : expanded.has(node.id);
       if (!isOpen) return;
 
-      // children first (so structure is visible)
-      for (const child of node.children.values()) {
-        pushGroup(child);
-      }
-
-      // then tasks directly under this group
+      for (const child of node.children.values()) pushGroup(child);
       for (const tid of node.taskIds || []) {
         const t = taskById.get(tid);
         if (t) out.push({ kind: "task", task: t });
       }
     }
 
-    // show all workstreams as first-level groups
-    for (const wsNode of root.children.values()) {
-      pushGroup(wsNode);
-    }
-
+    for (const wsNode of root.children.values()) pushGroup(wsNode);
     return out;
   }, [root, taskById, expanded]);
 
   return (
     <div style={{ padding: 14, overflowX: "auto" }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={s.btn} onClick={expandAll} disabled={disabled}>
-          Expand All
-        </button>
-        <button style={s.btn} onClick={collapseAll} disabled={disabled}>
-          Collapse All
-        </button>
+        <button style={s.btn} onClick={expandAll} disabled={disabled}>Expand All</button>
+        <button style={s.btn} onClick={collapseAll} disabled={disabled}>Collapse All</button>
         <div style={s.note}>
-          Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>). Group rows show
-          aggregated dates + duration. Expand to edit individual tasks.
+          Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>).
         </div>
       </div>
 
       <table style={s.table}>
         <thead>
           <tr>
-            {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies (Add Only)"].map(
-              (h) => (
-                <th key={h} style={s.th}>
-                  {h}
-                </th>
-              )
-            )}
+            {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies"].map((h) => (
+              <th key={h} style={s.th}>{h}</th>
+            ))}
           </tr>
         </thead>
 
@@ -1344,7 +1454,6 @@ function TaskTable({
               );
             }
 
-            // task row (FULL columns)
             return (
               <TaskRow
                 key={normalizeId(r.task.TaskId)}
@@ -1374,7 +1483,7 @@ function TaskTable({
       </table>
 
       <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Group rows are aggregated: Start = min(ES), Finish = max(EF), Dur = sum(DurationDays).
+        Dates shown are Target Dates (LOI + ES/EF). Group rows: Start=min(ES), Finish=max(EF), Dur=sum(DurationDays).
       </div>
     </div>
   );
@@ -1382,7 +1491,6 @@ function TaskTable({
 
 function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled }) {
   const s = makeStyles();
-
   const hasChildren = node.children && node.children.size > 0;
   const hasTasks = (node.taskIds || []).length > 0;
   const canToggle = hasChildren || hasTasks;
@@ -1395,21 +1503,13 @@ function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled })
 
   return (
     <tr style={{ background: "#f1f5f9" }}>
-      <td style={{ ...s.td, fontWeight: 950 }}>
+      <td style={{ ...s.td, fontWeight: 900 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: indentPx }}>
           <button
             type="button"
             onClick={onToggle}
             disabled={disabled || !canToggle}
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: 10,
-              border: "1px solid #e5eaf0",
-              background: "#fff",
-              cursor: disabled || !canToggle ? "not-allowed" : "pointer",
-              fontWeight: 950,
-            }}
+            style={s.toggleBtn}
             title={canToggle ? "Expand/Collapse" : "No children"}
           >
             {canToggle ? (expanded ? "–" : "+") : "·"}
@@ -1417,18 +1517,16 @@ function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled })
 
           <div style={{ minWidth: 0 }}>
             <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {node.label} <span style={{ color: "#64748b", fontWeight: 900 }}>({a.count})</span>
+              {node.label} <span style={{ color: "#64748b", fontWeight: 700 }}>({a.count})</span>
             </div>
           </div>
         </div>
       </td>
 
-      {/* Group row: ONLY Dur + Target Start/Finish */}
       <td style={s.tdMono}>{Number.isFinite(Number(a.durSum)) ? a.durSum : ""}</td>
       <td style={s.tdMono}>{start ? fmtDDMMMYY(start) : ""}</td>
       <td style={s.tdMono}>{finish ? fmtDDMMMYY(finish) : ""}</td>
 
-      {/* No Float/Critical/Deps at group level */}
       <td style={s.tdMono}></td>
       <td style={s.tdMono}></td>
       <td style={s.td}></td>
@@ -1436,20 +1534,7 @@ function GroupRow({ node, expanded, onToggle, dayToDate, fmtDDMMMYY, disabled })
   );
 }
 
-/* -------------------- Individual Task Row (UNCHANGED behavior) -------------------- */
-function TaskRow({
-  rowIndex,
-  task,
-  tasks,
-  depPairs,
-  disabled,
-  dayToDate,
-  fmtDDMMMYY,
-  onSaveDuration,
-  onAddDep,
-  onUpdateDep,
-  onDeleteDep,
-}) {
+function TaskRow({ rowIndex, task, tasks, depPairs, disabled, dayToDate, fmtDDMMMYY, onSaveDuration, onAddDep, onUpdateDep, onDeleteDep }) {
   const s = makeStyles();
   const isCrit = task.IsCritical === 1 || task.IsCritical === true;
 
@@ -1461,13 +1546,11 @@ function TaskRow({
 
   return (
     <tr style={{ background: isCrit ? "#fff7ed" : rowIndex % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
-      {/* Workstream / Task */}
       <td style={s.td}>
-        <div style={{ fontWeight: 800, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
-        <div style={{ fontWeight: 950 }}>{task.TaskName ?? ""}</div>
+        <div style={{ fontWeight: 700, color: "#64748b", fontSize: 12 }}>{task.Workstream ?? ""}</div>
+        <div style={{ fontWeight: 900 }}>{task.TaskName ?? ""}</div>
       </td>
 
-      {/* Dur + Save */}
       <td style={s.td}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
@@ -1488,15 +1571,12 @@ function TaskRow({
         </div>
       </td>
 
-      {/* Target Start/Finish */}
       <td style={s.tdMono}>{fmtDDMMMYY(startDt)}</td>
       <td style={s.tdMono}>{fmtDDMMMYY(finishDt)}</td>
 
-      {/* Float/Critical */}
       <td style={s.tdMono}>{task.TotalFloat ?? ""}</td>
-      <td style={{ ...s.tdMono, fontWeight: 950, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
+      <td style={{ ...s.tdMono, fontWeight: 900, color: isCrit ? "#b45309" : "#0f172a" }}>{isCrit ? "YES" : ""}</td>
 
-      {/* Dependencies */}
       <td style={{ ...s.td, minWidth: 520 }}>
         <PerTaskDependencies
           tasks={tasks}
@@ -1512,16 +1592,7 @@ function TaskRow({
   );
 }
 
-
-function PerTaskDependencies({
-  tasks,
-  depPairs,
-  successorTaskId,
-  disabled,
-  onAdd,
-  onUpdateDep,
-  onDeleteDep,
-}) {
+function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd, onUpdateDep, onDeleteDep }) {
   const s = makeStyles();
   const succ = normalizeId(successorTaskId);
 
@@ -1532,8 +1603,9 @@ function PerTaskDependencies({
     });
     return m;
   }, [tasks]);
+
   const succLabel = taskLabelById.get(succ) || `TaskId ${succ}`;
-  // existing deps INTO this successor
+
   const existing = useMemo(() => {
     return (depPairs || [])
       .filter((e) => normalizeId(e.succId) === succ && Number.isFinite(Number(e.depId)))
@@ -1545,7 +1617,6 @@ function PerTaskDependencies({
       }));
   }, [depPairs, succ]);
 
-  // Add-new controls
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
@@ -1569,7 +1640,6 @@ function PerTaskDependencies({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {/* Existing dependencies list */}
       <div style={s.depListBox}>
         <div style={s.depListTitle}>Predecessors</div>
 
@@ -1592,16 +1662,10 @@ function PerTaskDependencies({
         )}
       </div>
 
-      {/* Add new dependency */}
       <div style={s.perTaskDepWrap}>
         <div style={s.perTaskDepTitle}>Add Dependency</div>
 
-        <select
-          value={pred}
-          onChange={(e) => setPred(e.target.value)}
-          disabled={disabled}
-          style={s.addDepSelect}
-        >
+        <select value={pred} onChange={(e) => setPred(e.target.value)} disabled={disabled} style={s.addDepSelect}>
           <option value="">Predecessor Task</option>
           {options.map((x) => (
             <option key={x.id} value={x.id}>
@@ -1652,7 +1716,6 @@ function PerTaskDependencies({
 
 function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   const s = makeStyles();
-
   const [type, setType] = useState(dep.type || "FS");
   const [lag, setLag] = useState(String(dep.lag ?? 0));
   const [dirty, setDirty] = useState(false);
@@ -1672,12 +1735,8 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
         <div style={s.depLine} title={fromLabel}>
           <span style={s.depText}>{fromLabel}</span>
         </div>
-      
-        {!hasId && (
-          <div style={s.depInlineWarn}>
-            Missing TaskDependencyId from API. Update/Delete disabled.
-          </div>
-        )}
+        <div style={{ fontSize: 11, color: "#64748b", fontWeight: 700 }}>→ {toLabel}</div>
+        {!hasId && <div style={s.depInlineWarn}>Missing TaskDependencyId from API. Update/Delete disabled.</div>}
       </div>
 
       <select
@@ -1732,7 +1791,6 @@ function DepRow({ dep, fromLabel, toLabel, disabled, onSave, onDelete }) {
   );
 }
 
-
 /* -------------------- Date-based Gantt WITH CONNECTORS + CLICK + DRAG-TO-LINK -------------------- */
 function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskClick, onDragLink }) {
   const s = makeStyles();
@@ -1778,7 +1836,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
   };
 
-  // geometry map for hit testing (drop target)
   const geom = useMemo(() => {
     const m = new Map();
     valid.forEach((t, idx) => {
@@ -1801,7 +1858,13 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return m;
   }, [valid, HEADER_H, ROW_H, BAR_H, LEFT_COL_W, minStart, PX_PER_DAY]);
 
-  // normalize edges pred->succ
+  function getPredFromRaw(d) {
+    return d.PredecessorTaskId ?? d.predecessorTaskId ?? d.PredecessorId ?? d.predId ?? d.predTaskId;
+  }
+  function getSuccFromRaw(d) {
+    return d.SuccessorTaskId ?? d.successorTaskId ?? d.SuccessorId ?? d.succId ?? d.succTaskId;
+  }
+
   const edges = useMemo(() => {
     const out = [];
     (deps || []).forEach((d) => {
@@ -1820,13 +1883,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     return out;
   }, [deps, geom]);
 
-  function getPredFromRaw(d) {
-    return d.PredecessorTaskId ?? d.predecessorTaskId ?? d.PredecessorId ?? d.predId ?? d.predTaskId;
-  }
-  function getSuccFromRaw(d) {
-    return d.SuccessorTaskId ?? d.successorTaskId ?? d.SuccessorId ?? d.succId ?? d.succTaskId;
-  }
-
   const getAnchorX = (g, which) => (which === "start" ? g.xStart : g.xEnd);
   const resolveAnchors = (e) => {
     let fromWhich = "end";
@@ -1834,12 +1890,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     if (e.type === "SS") { fromWhich = "start"; toWhich = "start"; }
     else if (e.type === "FF") { fromWhich = "end"; toWhich = "end"; }
     else if (e.type === "SF") { fromWhich = "start"; toWhich = "end"; }
-    return {
-      x1: getAnchorX(e.from, fromWhich),
-      y1: e.from.yMid,
-      x2: getAnchorX(e.to, toWhich),
-      y2: e.to.yMid,
-    };
+    return { x1: getAnchorX(e.from, fromWhich), y1: e.from.yMid, x2: getAnchorX(e.to, toWhich), y2: e.to.yMid };
   };
 
   function startDrag(fromTaskId, clientX, clientY) {
@@ -1850,13 +1901,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
     const x = clientX - rect.left;
     const y = clientY - rect.top;
 
-    setDrag({
-      fromId: normalizeId(fromTaskId),
-      startX: x,
-      startY: y,
-      x,
-      y,
-    });
+    setDrag({ fromId: normalizeId(fromTaskId), startX: x, startY: y, x, y });
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -1871,11 +1916,8 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   }
 
   function findDropTarget(x, y) {
-    // must drop on a bar region (not just row)
     for (const [id, g] of geom.entries()) {
-      if (x >= g.xStart && x <= g.xEnd && y >= g.barTop && y <= g.barBottom) {
-        return id;
-      }
+      if (x >= g.xStart && x <= g.xEnd && y >= g.barTop && y <= g.barBottom) return id;
     }
     return null;
   }
@@ -1892,10 +1934,8 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
         const toId = findDropTarget(x, y);
 
         if (toId && toId !== cur.fromId) {
-          // UI-level quick checks before calling handler (extra safety)
           if (isDuplicateEdge(depPairs || [], cur.fromId, toId)) return null;
           if (wouldCreateCycle(depPairs || [], cur.fromId, toId)) return null;
-
           onDragLink?.(Number(cur.fromId), Number(toId));
         }
         return null;
@@ -1908,17 +1948,12 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 
   return (
     <div style={{ padding: compact ? 12 : 14 }}>
-      <div style={{ overflowX: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
-        <div
-          ref={containerRef}
-          style={{ position: "relative", width: canvasW, height: canvasH }}
-        >
-          {/* left header */}
+      <div style={s.ganttWrap}>
+        <div ref={containerRef} style={{ position: "relative", width: canvasW, height: canvasH }}>
           <div style={{ position: "absolute", left: 0, top: 0, width: LEFT_COL_W, height: HEADER_H, ...s.ganttHeader }}>
             Task
           </div>
 
-          {/* timeline header */}
           <div style={{ position: "absolute", left: LEFT_COL_W, top: 0, width: timelineW, height: HEADER_H, ...s.ganttHeader }}>
             {Array.from({ length: totalDays + 1 }).map((_, i) => {
               if (i % tickStep !== 0) return null;
@@ -1947,7 +1982,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
-          {/* ROWS */}
           <div style={{ position: "absolute", left: 0, top: HEADER_H, width: canvasW, zIndex: 2 }}>
             {valid.map((t) => {
               const isCrit = t.IsCritical === 1 || t.IsCritical === true;
@@ -1959,19 +1993,12 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               const barLeft = (t.ES - minStart) * PX_PER_DAY;
 
               return (
-                <div
-                  key={normalizeId(t.TaskId)}
-                  style={{
-                    display: "flex",
-                    height: ROW_H,
-                    borderBottom: "1px solid #eef2f7",
-                  }}
-                >
+                <div key={normalizeId(t.TaskId)} style={{ display: "flex", height: ROW_H, borderBottom: "1px solid #eef2f7" }}>
                   <div style={{ width: LEFT_COL_W, padding: "6px 10px", overflow: "hidden" }}>
-                    <div style={{ fontWeight: 950, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    <div style={{ fontWeight: 900, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {t.TaskName}
                     </div>
-                    <div style={{ fontSize: 12, color: "#64748b", fontWeight: 800 }}>
+                    <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>
                       {t.Workstream} • {fmt(sDt)} → {fmt(fDt)}
                     </div>
                   </div>
@@ -2001,18 +2028,7 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
-          {/* SVG overlay for dependency connectors */}
-          <svg
-            width={canvasW}
-            height={canvasH}
-            style={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              pointerEvents: "none",
-              zIndex: 6,
-            }}
-          >
+          <svg width={canvasW} height={canvasH} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 6 }}>
             <defs>
               <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
                 <path d="M0,0 L9,3 L0,6 Z" fill="#111" />
@@ -2039,45 +2055,31 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
               );
             })}
 
-            {/* Drag preview line */}
             {drag && (
-              <>
-                <path
-                  d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
-                  fill="none"
-                  stroke="#0f172a"
-                  strokeWidth="1.8"
-                  opacity="0.65"
-                  markerEnd="url(#arrowGantt)"
-                />
-              </>
+              <path
+                d={`M ${drag.startX} ${drag.startY} L ${drag.x} ${drag.y}`}
+                fill="none"
+                stroke="#0f172a"
+                strokeWidth="1.8"
+                opacity="0.65"
+                markerEnd="url(#arrowGantt)"
+              />
             )}
           </svg>
         </div>
       </div>
 
-      {!compact && (
-        <div style={s.note}>
-          Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag from Task Table.
-        </div>
-      )}
+      {!compact && <div style={s.note}>Tip: Drag bar → bar to create dependency (FS + 0). Add non-FS links + lag in Task Table.</div>}
     </div>
   );
 }
 
-/* -------------------- Network Diagram -------------------- */
-/* -------------------- Network Diagram -------------------- */
+/* -------------------- Network Diagram (critical only for performance) -------------------- */
 function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, getType }) {
   const normId = (v) => (v == null ? null : String(v));
 
-  // ✅ keep only critical tasks
-  const criticalTasks = useMemo(() => {
-    return (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true);
-  }, [tasks]);
-
-  const criticalIdSet = useMemo(() => {
-    return new Set(criticalTasks.map((t) => normId(t.TaskId)));
-  }, [criticalTasks]);
+  const criticalTasks = useMemo(() => (tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true), [tasks]);
+  const criticalIdSet = useMemo(() => new Set(criticalTasks.map((t) => normId(t.TaskId))), [criticalTasks]);
 
   const { nodes, edges, w, h } = useMemo(() => {
     const g = new dagre.graphlib.Graph();
@@ -2087,32 +2089,22 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     const NODE_W = 240;
     const NODE_H = 70;
 
-    // ✅ nodes: critical only
     for (const t of criticalTasks) g.setNode(normId(t.TaskId), { width: NODE_W, height: NODE_H });
 
-    // ✅ edges: only between critical nodes
     const edgeList = [];
     (deps || []).forEach((d) => {
       const pred = normId(getPredId(d));
       const succ = normId(getSuccId(d));
       if (!pred || !succ) return;
-
       if (!criticalIdSet.has(pred) || !criticalIdSet.has(succ)) return;
 
       const depId = getDepId(d);
       if (!Number.isFinite(Number(depId))) return;
 
       g.setEdge(pred, succ, { id: String(depId) });
-
       const type = String(getType(d) || "FS").toUpperCase();
       const lag = Number(getLag(d) || 0);
-
-      edgeList.push({
-        id: String(depId),
-        from: pred,
-        to: succ,
-        label: `${type}${lag !== 0 ? `+${lag}` : ""}`,
-      });
+      edgeList.push({ id: String(depId), from: pred, to: succ, label: `${type}${lag !== 0 ? `+${lag}` : ""}` });
     });
 
     dagre.layout(g);
@@ -2140,17 +2132,13 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
     return { nodes: nodeList, edges: edgeGeom, w: gw, h: gh };
   }, [criticalTasks, deps, getPredId, getSuccId, getDepId, getLag, getType, criticalIdSet]);
 
-  if (!nodes.length) {
-    const s = makeStyles();
-    return <div style={{ padding: 14, color: "#64748b", fontWeight: 900 }}>No critical path tasks to display.</div>;
-  }
-
+  if (!nodes.length) return <div style={{ padding: 14, color: "#64748b", fontWeight: 800 }}>No critical path tasks to display.</div>;
   const s = makeStyles();
 
   return (
     <div style={{ padding: 14 }}>
       <div style={s.note}>Showing only Critical Path nodes + their internal dependencies.</div>
-      <div style={{ overflow: "auto", border: "1px solid #e5eaf0", borderRadius: 14, background: "#fff" }}>
+      <div style={s.netWrap}>
         <svg width={w} height={h} style={{ background: "#fff" }}>
           <defs>
             <marker id="arrowNet" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
@@ -2199,6 +2187,7 @@ function parseISO(s) {
   const d = new Date(String(s).slice(0, 10) + "T00:00:00");
   return isNaN(d.getTime()) ? null : d;
 }
+
 function toISO(d) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -2207,450 +2196,139 @@ function toISO(d) {
 }
 
 /* =========================================================
-   Styles
+   Styles (compact but complete keys)
    ========================================================= */
 function makeStyles() {
-  const pageBg = "#f6f8fb";
-  const cardBg = "#ffffff";
   const border = "#e5eaf0";
   const text = "#0f172a";
   const sub = "#64748b";
   const dark = "#0f172a";
 
   return {
-    page: {
-      minHeight: "100vh",
-      background: pageBg,
-      color: text,
-      fontFamily:
-        'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif',
-    },
-
-    topbar: {
-      position: "sticky",
-      top: 0,
-      zIndex: 50,
-      background: cardBg,
-      borderBottom: `1px solid ${border}`,
-      padding: "12px 18px",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 12,
-    },
-
+    page: { minHeight: "100vh", background: "#f6f8fb", color: text, fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" },
+    topbar: { position: "sticky", top: 0, zIndex: 50, background: "#fff", borderBottom: `1px solid ${border}`, padding: "12px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
     brandWrap: { display: "flex", alignItems: "center", gap: 10 },
     brandDot: { width: 34, height: 34, borderRadius: 10, background: "linear-gradient(135deg, #0f172a, #1f2937)" },
-    brandTitle: { fontWeight: 950, letterSpacing: 0.2 },
-    brandSub: { fontSize: 12, color: sub, fontWeight: 800 },
+    brandTitle: { fontWeight: 900 },
+    brandSub: { fontSize: 12, color: sub, fontWeight: 700 },
 
     tabs: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" },
-    tabBtn: {
-      border: `1px solid ${border}`,
-      background: "#fff",
-      color: text,
-      padding: "8px 10px",
-      borderRadius: 10,
-      fontWeight: 900,
-      cursor: "pointer",
-    },
-    tabBtnActive: {
-      border: "1px solid #0ea5a4",
-      boxShadow: "0 0 0 3px rgba(14,165,164,0.10)",
-    },
+    tabBtn: { border: `1px solid ${border}`, background: "#fff", color: text, padding: "8px 10px", borderRadius: 10, fontWeight: 800, cursor: "pointer" },
+    tabBtnActive: { border: "1px solid #0ea5a4", boxShadow: "0 0 0 3px rgba(14,165,164,0.10)" },
 
     topActions: { display: "flex", alignItems: "center", gap: 10 },
-
     content: { maxWidth: 1600, margin: "0 auto", padding: "16px 18px 28px" },
 
-    projectBar: {
-      background: cardBg,
-      border: `1px solid ${border}`,
-      borderRadius: 14,
-      padding: 14,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 12,
-      boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-    },
+    projectBar: { background: "#fff", border: `1px solid ${border}`, borderRadius: 14, padding: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, boxShadow: "0 1px 2px rgba(0,0,0,0.04)" },
     projectLeft: { display: "flex", flexDirection: "column", gap: 6 },
-    projectName: { fontWeight: 950, fontSize: 18 },
-    projectMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900 },
-
+    projectName: { fontWeight: 900, fontSize: 18 },
+    projectMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 700 },
     projectRight: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    inlineLabel: { display: "flex", alignItems: "center", gap: 8, fontWeight: 900, color: "#334155" },
-    input: {
-      width: 90,
-      padding: "8px 10px",
-      borderRadius: 10,
-      border: `1px solid ${border}`,
-      outline: "none",
-      background: "#fff",
-    },
+    inlineLabel: { display: "flex", alignItems: "center", gap: 8, fontWeight: 800, color: "#334155" },
+    input: { width: 90, padding: "8px 10px", borderRadius: 10, border: `1px solid ${border}`, outline: "none", background: "#fff" },
 
-    btn: {
-      padding: "8px 12px",
-      borderRadius: 10,
-      border: `1px solid ${border}`,
-      background: "#ffffff",
-      color: text,
-      fontWeight: 900,
-      cursor: "pointer",
-    },
-    btnDark: {
-      padding: "8px 12px",
-      borderRadius: 10,
-      border: `1px solid ${dark}`,
-      background: dark,
-      color: "#fff",
-      fontWeight: 950,
-      cursor: "pointer",
-    },
-    btnPrimary: {
-      padding: "10px 14px",
-      borderRadius: 12,
-      border: "1px solid #0ea5a4",
-      background: "#0ea5a4",
-      color: "#ffffff",
-      fontWeight: 950,
-      cursor: "pointer",
-    },
+    btn: { padding: "8px 12px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", color: text, fontWeight: 800, cursor: "pointer" },
+    btnDark: { padding: "8px 12px", borderRadius: 10, border: `1px solid ${dark}`, background: dark, color: "#fff", fontWeight: 900, cursor: "pointer" },
+    btnPrimary: { padding: "10px 14px", borderRadius: 12, border: "1px solid #0ea5a4", background: "#0ea5a4", color: "#fff", fontWeight: 900, cursor: "pointer" },
     btnDisabled: { opacity: 0.55, cursor: "not-allowed" },
 
-    error: {
-      marginTop: 12,
-      background: "#fef2f2",
-      border: "1px solid #fecaca",
-      color: "#991b1b",
-      padding: "10px 12px",
-      borderRadius: 12,
-      fontWeight: 900,
-    },
-    warn: {
-      marginTop: 12,
-      background: "#fff7ed",
-      border: "1px solid #fed7aa",
-      color: "#92400e",
-      padding: "10px 12px",
-      borderRadius: 12,
-      fontWeight: 900,
-    },
+    error: { marginTop: 12, background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b", padding: "10px 12px", borderRadius: 12, fontWeight: 800 },
+    warn: { marginTop: 12, background: "#fff7ed", border: "1px solid #fed7aa", color: "#92400e", padding: "10px 12px", borderRadius: 12, fontWeight: 800 },
 
-    card: {
-      marginTop: 14,
-      background: cardBg,
-      border: `1px solid ${border}`,
-      borderRadius: 14,
-      boxShadow: "0 1px 2px rgba(0,0,0,0.04)",
-      overflow: "hidden",
-    },
-    cardHeader: {
-      padding: 14,
-      borderBottom: `1px solid ${border}`,
-      display: "flex",
-      alignItems: "baseline",
-      justifyContent: "space-between",
-      gap: 10,
-      flexWrap: "wrap",
-    },
+    card: { marginTop: 14, background: "#fff", border: `1px solid ${border}`, borderRadius: 14, boxShadow: "0 1px 2px rgba(0,0,0,0.04)", overflow: "hidden" },
+    cardHeader: { padding: 14, borderBottom: `1px solid ${border}`, display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" },
     cardHeaderRight: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    cardTitle: { fontWeight: 950, fontSize: 16 },
-    cardSub: { fontSize: 12, color: sub, fontWeight: 800 },
+    cardTitle: { fontWeight: 900, fontSize: 16 },
+    cardSub: { fontSize: 12, color: sub, fontWeight: 700 },
 
-    kpiGrid: {
-      padding: 14,
-      display: "grid",
-      gridTemplateColumns: "repeat(4, minmax(180px, 1fr))",
-      gap: 12,
-    },
-    kpiCard: {
-      background: "#f8fafc",
-      border: `1px solid ${border}`,
-      borderRadius: 14,
-      padding: 14,
-      textAlign: "center",
-    },
-    kpiValue: { fontWeight: 950, fontSize: 28, color: "#0ea5a4" },
-    kpiLabel: { marginTop: 6, fontWeight: 900, color: "#334155" },
+    twoCol: { display: "grid", gridTemplateColumns: "1.6fr 0.4fr", gap: 14, marginTop: 14 },
+
+    kpiGrid: { padding: 14, display: "grid", gridTemplateColumns: "repeat(4, minmax(180px, 1fr))", gap: 12 },
+    kpiCard: { background: "#f8fafc", border: `1px solid ${border}`, borderRadius: 14, padding: 14, textAlign: "center" },
+    kpiValue: { fontWeight: 900, fontSize: 28, color: "#0ea5a4" },
+    kpiLabel: { marginTop: 6, fontWeight: 800, color: "#334155" },
 
     listRow: { padding: "10px 0", borderBottom: `1px solid ${border}` },
-    listMeta: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 2 },
-    muted: { color: sub, fontWeight: 800 },
+    listMeta: { fontSize: 12, color: sub, fontWeight: 700, marginTop: 2 },
+    muted: { color: sub, fontWeight: 700 },
 
     table: { width: "100%", borderCollapse: "separate", borderSpacing: 0, fontSize: 13 },
-    th: {
-      textAlign: "left",
-      padding: "10px 10px",
-      background: "#f1f5f9",
-      borderBottom: `1px solid ${border}`,
-      fontWeight: 950,
-      color: text,
-      whiteSpace: "nowrap",
-      position: "sticky",
-      top: 0,
-      zIndex: 1,
-    },
+    th: { textAlign: "left", padding: "10px 10px", background: "#f1f5f9", borderBottom: `1px solid ${border}`, fontWeight: 900, color: text, whiteSpace: "nowrap", position: "sticky", top: 0, zIndex: 1 },
     td: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text },
     tdMono: { padding: "10px 10px", borderBottom: "1px solid #eef2f7", verticalAlign: "top", color: text, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
     tdInput: { width: 72, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
 
-    smallBtnDark: {
-      padding: "6px 10px",
-      borderRadius: 10,
-      border: `1px solid ${dark}`,
-      background: dark,
-      color: "#fff",
-      fontWeight: 950,
-      cursor: "pointer",
-    },
+    smallBtnDark: { padding: "6px 10px", borderRadius: 10, border: `1px solid ${dark}`, background: dark, color: "#fff", fontWeight: 900, cursor: "pointer" },
+    smallBtnDanger: { padding: "6px 10px", borderRadius: 10, border: "1px solid #b91c1c", background: "#b91c1c", color: "#fff", fontWeight: 900, cursor: "pointer" },
 
-    ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 950, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
+    note: { marginTop: 10, fontSize: 12, color: sub, fontWeight: 700 },
 
-    note: { marginTop: 10, fontSize: 12, color: sub, fontWeight: 800 },
+    overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.25)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 },
+    overlayCard: { background: "#fff", border: `1px solid ${border}`, borderRadius: 12, padding: "16px 18px", minWidth: 420, boxShadow: "0 10px 25px rgba(0,0,0,0.12)", display: "flex", gap: 12, alignItems: "center" },
+    overlayTitle: { fontWeight: 900, color: text },
+    overlaySub: { fontSize: 12, color: sub, fontWeight: 700 },
 
-    overlay: {
-      position: "fixed",
-      inset: 0,
-      background: "rgba(15, 23, 42, 0.25)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      zIndex: 9999,
-    },
-    overlayCard: {
-      background: "#ffffff",
-      border: `1px solid ${border}`,
-      borderRadius: 12,
-      padding: "16px 18px",
-      minWidth: 420,
-      boxShadow: "0 10px 25px rgba(0,0,0,0.12)",
-      display: "flex",
-      gap: 12,
-      alignItems: "center",
-    },
-    overlayTitle: { fontWeight: 950, color: text },
-    overlaySub: { fontSize: 12, color: sub, fontWeight: 800 },
-
-    modalOverlay: {
-      position: "fixed",
-      inset: 0,
-      background: "rgba(15,23,42,0.35)",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      zIndex: 10000,
-      padding: 16,
-    },
-    modal: {
-      width: "min(980px, 100%)",
-      background: "#fff",
-      borderRadius: 16,
-      border: `1px solid ${border}`,
-      boxShadow: "0 25px 70px rgba(0,0,0,0.30)",
-      overflow: "hidden",
-    },
-    modalHeader: {
-      padding: 14,
-      borderBottom: `1px solid ${border}`,
-      display: "flex",
-      alignItems: "flex-start",
-      justifyContent: "space-between",
-      gap: 12,
-    },
-    modalTitle: { fontWeight: 950, fontSize: 16 },
-    modalSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
-    iconBtn: {
-      border: `1px solid ${border}`,
-      background: "#fff",
-      borderRadius: 10,
-      width: 36,
-      height: 36,
-      cursor: "pointer",
-      fontWeight: 950,
-    },
+    modalOverlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10000, padding: 16 },
+    modal: { width: "min(980px, 100%)", background: "#fff", borderRadius: 16, border: `1px solid ${border}`, boxShadow: "0 25px 70px rgba(0,0,0,0.30)", overflow: "hidden" },
+    modalHeader: { padding: 14, borderBottom: `1px solid ${border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+    modalTitle: { fontWeight: 900, fontSize: 16 },
+    modalSub: { fontSize: 12, color: sub, fontWeight: 700, marginTop: 4 },
+    iconBtn: { border: `1px solid ${border}`, background: "#fff", borderRadius: 10, width: 36, height: 36, cursor: "pointer", fontWeight: 900 },
     modalBody: { padding: 14 },
-    modalFooter: {
-      padding: 14,
-      borderTop: `1px solid ${border}`,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "flex-end",
-      gap: 10,
-    },
-    formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
+    modalFooter: { padding: 14, borderTop: `1px solid ${border}`, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10 },
+
+    formGrid: { display: "grid", gridTemplateColumns: "1fr", gap: 12 },
     milestoneGrid: { marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 },
 
     field: { display: "flex", flexDirection: "column", gap: 6 },
-    fieldLabel: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontWeight: 950, fontSize: 12 },
-    fieldHint: { fontSize: 12, color: sub, fontWeight: 800 },
-    req: {
-      fontSize: 11,
-      padding: "2px 8px",
-      borderRadius: 999,
-      background: "#fff7ed",
-      border: "1px solid #fed7aa",
-      color: "#b45309",
-      fontWeight: 950,
-    },
-    inputWide: {
-      width: "100%",
-      padding: "10px 10px",
-      borderRadius: 12,
-      border: `1px solid ${border}`,
-      outline: "none",
-      background: "#fff",
-    },
+    fieldLabel: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, fontWeight: 900, fontSize: 12 },
+    fieldHint: { fontSize: 12, color: sub, fontWeight: 700 },
+    req: { fontSize: 11, padding: "2px 8px", borderRadius: 999, background: "#fff7ed", border: "1px solid #fed7aa", color: "#b45309", fontWeight: 900 },
+    inputWide: { width: "100%", padding: "10px 10px", borderRadius: 12, border: `1px solid ${border}`, outline: "none", background: "#fff" },
 
-    relHeaderCard: {
-      background: "#f8fafc",
-      border: "1px solid #e5eaf0",
-      borderRadius: 14,
-      padding: 12,
-    },
-    relMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 900, marginTop: 6 },
-    relCard: {
-      background: "#ffffff",
-      border: "1px solid #e5eaf0",
-      borderRadius: 14,
-      padding: 12,
-    },
-    relTitle: { fontWeight: 950 },
-    relSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4, marginBottom: 10 },
+    relHeaderCard: { background: "#f8fafc", border: `1px solid ${border}`, borderRadius: 14, padding: 12 },
+    relMeta: { display: "flex", gap: 10, flexWrap: "wrap", color: sub, fontSize: 12, fontWeight: 700, marginTop: 6 },
+    relGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 },
+    relCard: { background: "#fff", border: `1px solid ${border}`, borderRadius: 14, padding: 12 },
+    relTitle: { fontWeight: 900 },
+    relSub: { fontSize: 12, color: sub, fontWeight: 700, marginTop: 4, marginBottom: 10 },
     relRow: { padding: "10px 10px", border: "1px solid #eef2f7", borderRadius: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 },
-    relRowMain: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-    relRowMeta: { fontSize: 12, color: sub, fontWeight: 900, whiteSpace: "nowrap" },
+    relRowMain: { fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+    relRowMeta: { fontSize: 12, color: sub, fontWeight: 800, whiteSpace: "nowrap" },
 
-    sectionTitle: { fontWeight: 950, fontSize: 14 },
-    sectionSub: { fontSize: 12, color: sub, fontWeight: 800, marginTop: 4 },
+    sectionTitle: { fontWeight: 900, fontSize: 14 },
+    sectionSub: { fontSize: 12, color: sub, fontWeight: 700, marginTop: 4 },
 
-    // per-task add dep
-    perTaskDepWrap: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      flexWrap: "wrap",
-      padding: "8px 10px",
-      border: "1px solid #e5eaf0",
-      borderRadius: 12,
-      background: "#fff",
-    },
-    perTaskDepTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginRight: 4 },
-    addDepSelect: {
-      width: 260,
-      padding: "6px 8px",
+    perTaskDepWrap: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${border}`, borderRadius: 12, background: "#fff" },
+    perTaskDepTitle: { fontWeight: 900, color: "#334155", fontSize: 12, marginRight: 4 },
+    addDepSelect: { width: 260, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
+    typeSelect: { width: 80, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
+    addDepLag: { width: 80, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
+    typeSelectSmall: { width: 90, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
+    addDepLagSmall: { width: 90, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
+
+    depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 800, marginLeft: 6 },
+    depListBox: { border: `1px solid ${border}`, borderRadius: 12, padding: 10, background: "#fff" },
+    depListTitle: { fontWeight: 900, color: "#334155", fontSize: 12, marginBottom: 8 },
+
+    depRow2: { display: "grid", gridTemplateColumns: "1fr 90px 90px 80px 80px", gap: 8, alignItems: "center", border: "1px solid #eef2f7", borderRadius: 12, padding: "10px 10px", background: "#fff" },
+    depFromTo: { display: "flex", flexDirection: "column", gap: 6, minWidth: 0 },
+    depLine: { display: "flex", alignItems: "flex-start", minWidth: 0 },
+    depText: { fontWeight: 800, color: "#0f172a", whiteSpace: "normal", overflow: "visible", lineHeight: 1.2 },
+
+    ganttWrap: { overflowX: "auto", border: `1px solid ${border}`, borderRadius: 14, background: "#fff" },
+    ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 900, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
+
+    netWrap: { overflow: "auto", border: `1px solid ${border}`, borderRadius: 14, background: "#fff" },
+
+    toggleBtn: {
+      width: 28,
+      height: 28,
       borderRadius: 10,
-      border: "1px solid #e5eaf0",
+      border: `1px solid ${border}`,
       background: "#fff",
-      outline: "none",
-    },
-    typeSelect: {
-      width: 80,
-      padding: "6px 8px",
-      borderRadius: 10,
-      border: "1px solid #e5eaf0",
-      background: "#fff",
-      outline: "none",
-    },
-    addDepLag: {
-      width: 80,
-      padding: "6px 8px",
-      borderRadius: 10,
-      border: "1px solid #e5eaf0",
-      outline: "none",
-    },
-    depInlineWarn: { color: "#b91c1c", fontSize: 12, fontWeight: 900, marginLeft: 6 },
-    depListBox: {
-      border: "1px solid #e5eaf0",
-      borderRadius: 12,
-      padding: 10,
-      background: "#fff",
-    },
-    depListTitle: { fontWeight: 950, color: "#334155", fontSize: 12, marginBottom: 8 },
-    
-    depRow: {
-      display: "grid",
-      gridTemplateColumns: "1fr 90px 90px 80px 80px",
-      gap: 8,
-      alignItems: "center",
-      border: "1px solid #eef2f7",
-      borderRadius: 12,
-      padding: "8px 10px",
-      background: "#fff",
-    },
-    depPred: {
-      fontWeight: 900,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-    },
-    typeSelectSmall: {
-      width: 90,
-      padding: "6px 8px",
-      borderRadius: 10,
-      border: "1px solid #e5eaf0",
-      background: "#fff",
-      outline: "none",
-    },
-    addDepLagSmall: {
-      width: 90,
-      padding: "6px 8px",
-      borderRadius: 10,
-      border: "1px solid #e5eaf0",
-      outline: "none",
-    },
-    smallBtnDanger: {
-      padding: "6px 10px",
-      borderRadius: 10,
-      border: "1px solid #b91c1c",
-      background: "#b91c1c",
-      color: "#fff",
-      fontWeight: 950,
       cursor: "pointer",
+      fontWeight: 900,
     },
-    depRow2: {
-  display: "grid",
-  gridTemplateColumns: "1fr 90px 90px 80px 80px",
-  gap: 8,
-  alignItems: "center",
-  border: "1px solid #eef2f7",
-  borderRadius: 12,
-  padding: "10px 10px",
-  background: "#fff",
-},
-
-depFromTo: {
-  display: "flex",
-  flexDirection: "column",
-  gap: 6,
-  minWidth: 0,
-},
-
-depLine: {
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 0,
-  minWidth: 0,
-},
-
-depTag: {
-  fontSize: 10,
-  fontWeight: 950,
-  padding: "2px 8px",
-  borderRadius: 999,
-  background: "#f1f5f9",
-  border: "1px solid #e5eaf0",
-  color: "#334155",
-  flex: "0 0 auto",
-},
-
-depText: {
-  fontWeight: 900,
-  color: "#0f172a",
-  whiteSpace: "normal",     // ✅ allow wrap
-  overflow: "visible",
-  lineHeight: 1.2,
-},
-
   };
 }
