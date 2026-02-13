@@ -581,8 +581,8 @@ const currentMilestones = useMemo(() => {
         <div style={s.brandWrap}>
           <div style={s.brandDot} />
           <div>
-            <div style={s.brandTitle}>MSP Lite</div>
-            <div style={s.brandSub}>Scheduling • Critical Path • Baselines</div>
+            <div style={s.brandTitle}>RaySphere</div>
+            <div style={s.brandSub}>Powering Projects • Controlling Outcomes</div>
           </div>
         </div>
 
