@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-import logo from "./assets/msp-lite-logo.svg";
+import logo from "./assets/msp-lite-logo.png";
 /**
  * MSP Lite — App.jsx (FULL)
  *
