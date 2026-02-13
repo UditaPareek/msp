@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
-
+import logo from "./assets/msp-lite-logo.svg";
 /**
  * MSP Lite — App.jsx (FULL)
  *
@@ -579,7 +579,11 @@ const currentMilestones = useMemo(() => {
       {/* Top Nav */}
       <div style={s.topbar}>
         <div style={s.brandWrap}>
-          <div style={s.brandDot} />
+          <img
+            src={logo}
+            alt="MSP Lite"
+            style={{ width: 34, height: 34, borderRadius: 10, objectFit: "contain" }}
+          />
           <div>
             <div style={s.brandTitle}>RaySphere</div>
             <div style={s.brandSub}>Powering Projects • Controlling Outcomes</div>
