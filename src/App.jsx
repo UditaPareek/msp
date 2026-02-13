@@ -273,33 +273,76 @@ export default function App() {
   const needsStartDate = tasks.length > 0 && !projectStartDate;
 
   /* -------------------- milestone parsing for Edit Milestones modal -------------------- */
-  function anyToISODate(v) {
-    if (!v) return "";
-    const s = String(v).slice(0, 10);
-    const d = new Date(s + "T00:00:00");
-    if (isNaN(d.getTime())) return "";
-    return toISO(d);
+  // -------------------- milestone parsing for Edit Milestones modal (ROBUST) --------------------
+function anyToISODate(v) {
+  if (!v) return "";
+  // Accept Date, ISO string, "YYYY-MM-DD...", etc.
+  if (v instanceof Date && !isNaN(v.getTime())) return toISO(v);
+  const s = String(v).slice(0, 10);
+  const d = new Date(s + "T00:00:00");
+  if (isNaN(d.getTime())) return "";
+  return toISO(d);
+}
+
+function pickDate(...vals) {
+  for (const v of vals) {
+    const iso = anyToISODate(v);
+    if (iso) return iso;
+  }
+  return "";
+}
+
+const currentMilestones = useMemo(() => {
+  const out = {};
+  for (const f of MILESTONE_FIELDS) out[f.key] = "";
+
+  // 1) If API gives a milestones map (best case)
+  if (project?.milestones && typeof project.milestones === "object") {
+    for (const k of Object.keys(out)) out[k] = anyToISODate(project.milestones[k]);
   }
 
-  const currentMilestones = useMemo(() => {
-    const out = {};
-    for (const f of MILESTONE_FIELDS) out[f.key] = "";
-
-    if (project?.milestones && typeof project.milestones === "object") {
-      for (const k of Object.keys(out)) out[k] = anyToISODate(project.milestones[k]);
-      return out;
+  // 2) If API gives a milestones array
+  if (Array.isArray(project?.Milestones)) {
+    for (const row of project.Milestones) {
+      const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim();
+      const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
+      if (code && code in out) out[code] = anyToISODate(dt);
     }
+  }
 
-    if (Array.isArray(project?.Milestones)) {
-      for (const row of project.Milestones) {
-        const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim();
-        const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
-        if (code && code in out) out[code] = anyToISODate(dt);
-      }
-    }
+  // 3) HARD FALLBACKS (this is what fixes your UI)
+  // LOI fallback from projectStartDate (most backends do provide this)
+  out.LOI = out.LOI || pickDate(
+    project?.projectStartDate,
+    project?.ProjectStartDate,
+    project?.LOI,
+    project?.loi
+  );
 
-    return out;
-  }, [project]);
+  // Contract COD fallback from common field names (adjusted for typical backends)
+  out.COMM_CONTRACT = out.COMM_CONTRACT || pickDate(
+    project?.contractCOD,
+    project?.contractCod,
+    project?.ContractCOD,
+    project?.contractCommissioningDate,
+    project?.ContractCommissioningDate,
+    project?.commContract,
+    project?.CommContractDate,
+    project?.COMM_CONTRACT
+  );
+
+  // If your backend stores internal COD explicitly, try to show it too (optional)
+  // (Even if you don't store it, modal will compute Internal COD from COMM_CONTRACT - bufferDays)
+  out.COMM_INTERNAL = out.COMM_INTERNAL || pickDate(
+    project?.internalCOD,
+    project?.internalCod,
+    project?.InternalCOD,
+    project?.internalCommissioningDate,
+    project?.COMM_INTERNAL
+  );
+
+  return out;
+}, [project]);
 
   /* -------------------- fetch helpers -------------------- */
   async function safeJson(res) {
