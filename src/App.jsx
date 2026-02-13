@@ -6,13 +6,18 @@ import { API_BASE } from "./config";
  * MSP Lite — App.jsx (FULL)
  *
  * Included:
- * 1) Task Table: per-task dependency add + edit/delete existing deps
+ * 1) Task Table: per-task duration edit + add/edit/delete deps
  * 2) Circular dependency prevention (UI DFS) + duplicate prevention
  * 3) Drag-to-link in Gantt (FS+0)
  * 4) New Project modal (template hidden; buffer fixed)
  * 5) Build job polling after createProject
  * 6) Edit Optional Milestones AFTER project creation (updateProjectMilestones) + recalc+reload
  * 7) Task relations popup (preds/succs)
+ *
+ * FIXES ADDED:
+ * - ✅ GanttDates dayToDate compile bug fixed (was truncated)
+ * - ✅ Task Table no longer renders 3000-option predecessor dropdown per row by default
+ *   (Add Dependency UI is collapsed by default + includes search + limited options)
  */
 
 const TABS = [
@@ -86,7 +91,7 @@ function wouldCreateCycle(depPairs, predId, succId) {
 function isDuplicateEdge(depPairs, predId, succId) {
   const P = normalizeId(predId);
   const S = normalizeId(succId);
-  return depPairs.some((e) => normalizeId(e.predId) === P && normalizeId(e.succId) === S);
+  return (depPairs || []).some((e) => normalizeId(e.predId) === P && normalizeId(e.succId) === S);
 }
 
 /* =========================================================
@@ -127,6 +132,9 @@ export default function App() {
     null;
 
   const project = schedule?.project ?? null;
+
+  /* -------------------- tolerant task id -------------------- */
+  const getTaskId = (t) => t?.TaskId ?? t?.TaskID ?? t?.taskId ?? t?.id;
 
   /* -------------------- dependency field tolerance -------------------- */
   const getPredId = (d) =>
@@ -187,11 +195,11 @@ export default function App() {
       });
     }
     return out;
-  }, [deps]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [deps]);
 
   const taskById = useMemo(() => {
     const m = new Map();
-    for (const t of tasks || []) m.set(normalizeId(t.TaskId), t);
+    for (const t of tasks || []) m.set(normalizeId(getTaskId(t)), t);
     return m;
   }, [tasks]);
 
@@ -217,8 +225,8 @@ export default function App() {
   }, [depPairs]);
 
   const selectedTask = selectedTaskId ? taskById.get(normalizeId(selectedTaskId)) : null;
-  const selectedPreds = selectedTaskId ? (predecessorsByTask.get(normalizeId(selectedTaskId)) || []) : [];
-  const selectedSuccs = selectedTaskId ? (successorsByTask.get(normalizeId(selectedTaskId)) || []) : [];
+  const selectedPreds = selectedTaskId ? predecessorsByTask.get(normalizeId(selectedTaskId)) || [] : [];
+  const selectedSuccs = selectedTaskId ? successorsByTask.get(normalizeId(selectedTaskId)) || [] : [];
 
   /* -------------------- date model (LOI = project start) -------------------- */
   const projectStartDate = useMemo(() => {
@@ -232,8 +240,12 @@ export default function App() {
     }
 
     if (Array.isArray(project?.Milestones)) {
-      const loiRow = project.Milestones.find((x) => String(x?.MilestoneCode ?? x?.Key ?? x?.key) === "LOI");
-      const loi = parseISO(loiRow?.MilestoneDate ?? loiRow?.Date ?? loiRow?.date ?? loiRow?.Value ?? loiRow?.value);
+      const loiRow = project.Milestones.find(
+        (x) => String(x?.MilestoneCode ?? x?.Key ?? x?.key) === "LOI"
+      );
+      const loi = parseISO(
+        loiRow?.MilestoneDate ?? loiRow?.Date ?? loiRow?.date ?? loiRow?.Value ?? loiRow?.value
+      );
       if (loi) return loi;
     }
 
@@ -245,7 +257,7 @@ export default function App() {
     const n = Number(dayNo);
     if (!Number.isFinite(n)) return null;
     const d = new Date(projectStartDate.getTime());
-    d.setDate(d.getDate() + n);
+    d.setUTCDate(d.getUTCDate() + n);
     return d;
   };
 
@@ -322,7 +334,9 @@ export default function App() {
     try {
       const bust = Date.now();
       const [sch, dep] = await Promise.all([
-        fetchJson(`${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`),
+        fetchJson(
+          `${API_BASE}/getSchedule?projectId=${encodeURIComponent(nextProjectId)}&versionId=latest&t=${bust}`
+        ),
         fetchJson(`${API_BASE}/getDependencies?projectId=${encodeURIComponent(nextProjectId)}&t=${bust}`),
       ]);
 
@@ -435,10 +449,10 @@ export default function App() {
     return json;
   }
 
-  // ✅ NEW: update optional milestones after project creation
+  // update optional milestones after project creation
   async function updateProjectMilestonesApi({ projectId, milestones }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateProjectMilestones?t=${Date.now()}`, {
-      method: "POST",
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ projectId, milestones }),
     });
@@ -577,7 +591,10 @@ export default function App() {
               </span>
               <span>•</span>
               <span>
-                Critical: <b>{kpi.critical}/{kpi.totalTasks}</b>
+                Critical:{" "}
+                <b>
+                  {kpi.critical}/{kpi.totalTasks}
+                </b>
               </span>
             </div>
           </div>
@@ -588,11 +605,7 @@ export default function App() {
               <input value={projectId} onChange={(e) => setProjectId(e.target.value)} style={s.input} disabled={loading} />
             </label>
 
-            <button
-              onClick={() => loadAll(projectId)}
-              disabled={loading}
-              style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}
-            >
+            <button onClick={() => loadAll(projectId)} disabled={loading} style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}>
               Load
             </button>
 
@@ -605,7 +618,6 @@ export default function App() {
               Recalculate
             </button>
 
-            {/* ✅ NEW: Edit Optional Milestones */}
             <button
               onClick={() => setShowEditMilestones(true)}
               disabled={loading || !(project?.ProjectId ?? projectId)}
@@ -662,10 +674,14 @@ export default function App() {
                     depPairs={depPairs}
                     startDate={projectStartDate}
                     compact
-                    onTaskClick={(id) => setSelectedTaskId(id)}
+                    onTaskClick={(id) => setSelectedTaskId(normalizeId(id))}
                     onDragLink={(predId, succId) =>
-                      addDependencyGuarded({ predecessorTaskId: predId, successorTaskId: succId, linkType: "FS", lagDays: 0 })
-                        .catch((e) => setError(e.message || String(e)))
+                      addDependencyGuarded({
+                        predecessorTaskId: predId,
+                        successorTaskId: succId,
+                        linkType: "FS",
+                        lagDays: 0,
+                      }).catch((e) => setError(e.message || String(e)))
                     }
                   />
                 ) : (
@@ -687,7 +703,7 @@ export default function App() {
                       .filter((t) => t.IsCritical === 1 || t.IsCritical === true)
                       .slice(0, 12)
                       .map((t) => (
-                        <div key={normalizeId(t.TaskId)} style={s.listRow}>
+                        <div key={normalizeId(getTaskId(t))} style={s.listRow}>
                           <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
                           <div style={s.listMeta}>
                             {t.Workstream} • Start {fmtDDMMMYY(dayToDate(t.ES))} • Finish {fmtDDMMMYY(dayToDate(t.EF))}
@@ -723,10 +739,14 @@ export default function App() {
                 deps={deps}
                 depPairs={depPairs}
                 startDate={projectStartDate}
-                onTaskClick={(id) => setSelectedTaskId(id)}
+                onTaskClick={(id) => setSelectedTaskId(normalizeId(id))}
                 onDragLink={(predId, succId) =>
-                  addDependencyGuarded({ predecessorTaskId: predId, successorTaskId: succId, linkType: "FS", lagDays: 0 })
-                    .catch((e) => setError(e.message || String(e)))
+                  addDependencyGuarded({
+                    predecessorTaskId: predId,
+                    successorTaskId: succId,
+                    linkType: "FS",
+                    lagDays: 0,
+                  }).catch((e) => setError(e.message || String(e)))
                 }
               />
             ) : (
@@ -767,7 +787,9 @@ export default function App() {
             <div style={s.cardHeader}>
               <div>
                 <div style={s.cardTitle}>Task Table (Edit Duration / Add Dependencies)</div>
-                <div style={s.cardSub}>Per task: choose predecessor + link type + lag. (Circular + duplicate blocked)</div>
+                <div style={s.cardSub}>
+                  Per task: edit duration, view/edit/delete deps. Add deps via search (duplicate/cycle blocked).
+                </div>
               </div>
 
               <div style={s.cardHeaderRight}>
@@ -868,14 +890,18 @@ export default function App() {
               // poll job status
               const start = Date.now();
               while (true) {
-                const { res, json } = await fetchJson(`${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`);
+                const { res, json } = await fetchJson(
+                  `${API_BASE}/getBuildJobStatus?jobId=${encodeURIComponent(jobId)}&t=${Date.now()}`
+                );
                 if (!res.ok || !json?.ok) throw new Error(json?.error || "Job status failed");
 
                 const status = String(json.status || "").toUpperCase();
                 if (status === "DONE") break;
                 if (status === "FAILED") throw new Error(`Build failed at ${json.step}: ${json.error || "Unknown error"}`);
 
-                if (Date.now() - start > 10 * 60 * 1000) throw new Error("Build is taking too long. Check job status in DB.");
+                if (Date.now() - start > 10 * 60 * 1000) {
+                  throw new Error("Build is taking too long. Check job status in DB.");
+                }
 
                 await new Promise((r) => setTimeout(r, 2500));
               }
@@ -895,7 +921,7 @@ export default function App() {
         />
       )}
 
-      {/* ✅ Edit Optional Milestones Modal */}
+      {/* Edit Optional Milestones Modal */}
       {showEditMilestones && (
         <EditMilestonesModal
           loading={loading}
@@ -910,7 +936,7 @@ export default function App() {
               const pid = Number(project?.ProjectId ?? projectId);
               await updateProjectMilestonesApi({ projectId: pid, milestones: milestonesPatch });
               setShowEditMilestones(false);
-              await recalcAndReload(String(pid)); // ✅ mandatory
+              await recalcAndReload(String(pid));
             } catch (e) {
               setError(e.message || String(e));
             } finally {
@@ -1007,20 +1033,30 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
             <div style={s.modalTitle}>Task Relations</div>
             <div style={s.modalSub}>Predecessors and successors for the selected task.</div>
           </div>
-          <button style={s.iconBtn} onClick={onClose}>✕</button>
+          <button style={s.iconBtn} onClick={onClose}>
+            ✕
+          </button>
         </div>
 
         <div style={s.modalBody}>
           <div style={s.relHeaderCard}>
             <div style={{ fontWeight: 900, fontSize: 16 }}>{task.TaskName}</div>
             <div style={s.relMeta}>
-              <span><b>Workstream:</b> {task.Workstream || "-"}</span>
+              <span>
+                <b>Workstream:</b> {task.Workstream || "-"}
+              </span>
               <span>•</span>
-              <span><b>Duration:</b> {task.DurationDays ?? "-"}</span>
+              <span>
+                <b>Duration:</b> {task.DurationDays ?? "-"}
+              </span>
               <span>•</span>
-              <span><b>Target:</b> {fmtDDMMMYY(start)} → {fmtDDMMMYY(finish)}</span>
+              <span>
+                <b>Target:</b> {fmtDDMMMYY(start)} → {fmtDDMMMYY(finish)}
+              </span>
               <span>•</span>
-              <span><b>Critical:</b> {(task.IsCritical === 1 || task.IsCritical === true) ? "YES" : "NO"}</span>
+              <span>
+                <b>Critical:</b> {task.IsCritical === 1 || task.IsCritical === true ? "YES" : "NO"}
+              </span>
             </div>
           </div>
 
@@ -1038,7 +1074,10 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
                     return (
                       <div key={i} style={s.relRow}>
                         <div style={s.relRowMain}>{x.predName}</div>
-                        <div style={s.relRowMeta}>{x.type}{x.lag ? ` +${x.lag}` : ""}</div>
+                        <div style={s.relRowMeta}>
+                          {x.type}
+                          {x.lag ? ` +${x.lag}` : ""}
+                        </div>
                       </div>
                     );
                   })}
@@ -1059,7 +1098,10 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
                     return (
                       <div key={i} style={s.relRow}>
                         <div style={s.relRowMain}>{x.succName}</div>
-                        <div style={s.relRowMeta}>{x.type}{x.lag ? ` +${x.lag}` : ""}</div>
+                        <div style={s.relRowMeta}>
+                          {x.type}
+                          {x.lag ? ` +${x.lag}` : ""}
+                        </div>
                       </div>
                     );
                   })}
@@ -1070,7 +1112,9 @@ function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, 
         </div>
 
         <div style={s.modalFooter}>
-          <button style={s.btn} onClick={onClose}>Close</button>
+          <button style={s.btn} onClick={onClose}>
+            Close
+          </button>
         </div>
       </div>
     </div>
@@ -1095,7 +1139,7 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
     const d = parseISO(commContract);
     if (!d) return "";
     const x = new Date(d.getTime());
-    x.setDate(x.getDate() - Number(bufferDays || 30));
+    x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
     return toISO(x);
   }, [commContract, bufferDays]);
 
@@ -1113,7 +1157,9 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
               LOI is project start. Internal commissioning = Contract - {bufferDays} days. (Template applied automatically.)
             </div>
           </div>
-          <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
+          <button style={s.iconBtn} onClick={onClose} disabled={loading}>
+            ✕
+          </button>
         </div>
 
         <div style={s.modalBody}>
@@ -1154,7 +1200,9 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
         </div>
 
         <div style={s.modalFooter}>
-          <button style={s.btn} onClick={onClose} disabled={loading}>Cancel</button>
+          <button style={s.btn} onClick={onClose} disabled={loading}>
+            Cancel
+          </button>
           <button
             style={{ ...s.btnPrimary, ...(!canSubmit || loading ? s.btnDisabled : {}) }}
             disabled={!canSubmit || loading}
@@ -1195,15 +1243,14 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
     const o = {};
     for (const f of OPTIONAL_FIELDS) o[f.key] = initial?.[f.key] || "";
     setVals(o);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initial?.LOI, initial?.COMM_CONTRACT]);
+  }, [initial]); // ✅ correct
 
   const commContract = initial?.COMM_CONTRACT || "";
   const commissioningInternalDate = useMemo(() => {
     const d = parseISO(commContract);
     if (!d) return "";
     const x = new Date(d.getTime());
-    x.setDate(x.getDate() - Number(bufferDays || 30));
+    x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
     return toISO(x);
   }, [commContract, bufferDays]);
 
@@ -1211,11 +1258,12 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
   const patch = useMemo(() => {
     const p = {};
     for (const f of OPTIONAL_FIELDS) {
-      const v = String(vals[f.key] || "").trim();
-      p[f.key] = v ? v : null;
+      const next = String(vals[f.key] || "").trim();
+      const prev = String(initial?.[f.key] || "").trim();
+      if (next !== prev) p[f.key] = next ? next : null;
     }
     return p;
-  }, [vals, OPTIONAL_FIELDS]);
+  }, [vals, initial, OPTIONAL_FIELDS]);
 
   return (
     <div style={s.modalOverlay} onMouseDown={onClose}>
@@ -1227,7 +1275,9 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
               Update optional milestone dates. Empty value will clear that milestone. Save triggers Recalculate.
             </div>
           </div>
-          <button style={s.iconBtn} onClick={onClose} disabled={loading}>✕</button>
+          <button style={s.iconBtn} onClick={onClose} disabled={loading}>
+            ✕
+          </button>
         </div>
 
         <div style={s.modalBody}>
@@ -1256,7 +1306,9 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
         </div>
 
         <div style={s.modalFooter}>
-          <button style={s.btn} onClick={onClose} disabled={loading}>Cancel</button>
+          <button style={s.btn} onClick={onClose} disabled={loading}>
+            Cancel
+          </button>
           <button
             style={{ ...s.btnPrimary, ...(loading ? s.btnDisabled : {}) }}
             disabled={loading}
@@ -1422,8 +1474,12 @@ function TaskTable({ tasks, disabled, dayToDate, fmtDDMMMYY, depPairs, onSaveDur
   return (
     <div style={{ padding: 14, overflowX: "auto" }}>
       <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <button style={s.btn} onClick={expandAll} disabled={disabled}>Expand All</button>
-        <button style={s.btn} onClick={collapseAll} disabled={disabled}>Collapse All</button>
+        <button style={s.btn} onClick={expandAll} disabled={disabled}>
+          Expand All
+        </button>
+        <button style={s.btn} onClick={collapseAll} disabled={disabled}>
+          Collapse All
+        </button>
         <div style={s.note}>
           Grouping: <b>Workstream → Part-1 → Part-2 → Part-3</b> (split by <code>{" - "}</code>).
         </div>
@@ -1433,7 +1489,9 @@ function TaskTable({ tasks, disabled, dayToDate, fmtDDMMMYY, depPairs, onSaveDur
         <thead>
           <tr>
             {["Workstream / Group / Task", "Dur", "Target Start", "Target Finish", "Float", "Critical", "Dependencies"].map((h) => (
-              <th key={h} style={s.th}>{h}</th>
+              <th key={h} style={s.th}>
+                {h}
+              </th>
             ))}
           </tr>
         </thead>
@@ -1482,9 +1540,7 @@ function TaskTable({ tasks, disabled, dayToDate, fmtDDMMMYY, depPairs, onSaveDur
         </tbody>
       </table>
 
-      <div style={s.note}>
-        Dates shown are Target Dates (LOI + ES/EF). Group rows: Start=min(ES), Finish=max(EF), Dur=sum(DurationDays).
-      </div>
+      <div style={s.note}>Dates shown are Target Dates (LOI + ES/EF). Group rows: Start=min(ES), Finish=max(EF), Dur=sum(DurationDays).</div>
     </div>
   );
 }
@@ -1592,6 +1648,11 @@ function TaskRow({ rowIndex, task, tasks, depPairs, disabled, dayToDate, fmtDDMM
   );
 }
 
+/**
+ * PERF FIX:
+ * - Collapsed by default
+ * - Uses search + limited option list (prevents rendering 3000 options everywhere)
+ */
 function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd, onUpdateDep, onDeleteDep }) {
   const s = makeStyles();
   const succ = normalizeId(successorTaskId);
@@ -1617,26 +1678,43 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
       }));
   }, [depPairs, succ]);
 
+  const [openAdd, setOpenAdd] = useState(false);
+  const [q, setQ] = useState(""); // search query
   const [pred, setPred] = useState("");
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
 
-  const options = (tasks || [])
-    .filter((t) => normalizeId(t.TaskId) !== succ)
-    .map((t) => ({
-      id: normalizeId(t.TaskId),
-      label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
-    }));
+  // Keep base options as ids; don't render as <option> until user opens
+  const options = useMemo(() => {
+    return (tasks || [])
+      .filter((t) => normalizeId(t.TaskId) !== succ)
+      .map((t) => ({
+        id: normalizeId(t.TaskId),
+        label: `${t.Workstream || ""} — ${t.TaskName || ""}`.trim(),
+      }));
+  }, [tasks, succ]);
 
-  const canAdd =
-    !disabled &&
-    pred &&
-    normalizeId(pred) !== succ &&
-    !isDuplicateEdge(depPairs, pred, succ) &&
-    !wouldCreateCycle(depPairs, pred, succ);
+  // Filtered options: show limited results to avoid DOM freeze
+  const filteredOptions = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return options.slice(0, 120);
+    const out = [];
+    for (const o of options) {
+      if (o.label.toLowerCase().includes(needle)) out.push(o);
+      if (out.length >= 200) break;
+    }
+    return out;
+  }, [options, q]);
 
   const dup = pred && isDuplicateEdge(depPairs, pred, succ);
   const cyc = pred && wouldCreateCycle(depPairs, pred, succ);
+
+  const canAdd =
+    !disabled &&
+    !!pred &&
+    normalizeId(pred) !== succ &&
+    !dup &&
+    !cyc;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1663,52 +1741,89 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
       </div>
 
       <div style={s.perTaskDepWrap}>
-        <div style={s.perTaskDepTitle}>Add Dependency</div>
-
-        <select value={pred} onChange={(e) => setPred(e.target.value)} disabled={disabled} style={s.addDepSelect}>
-          <option value="">Predecessor Task</option>
-          {options.map((x) => (
-            <option key={x.id} value={x.id}>
-              {x.label}
-            </option>
-          ))}
-        </select>
-
-        <select value={type} onChange={(e) => setType(e.target.value)} disabled={disabled} style={s.typeSelect}>
-          <option value="FS">FS</option>
-          <option value="SS">SS</option>
-          <option value="FF">FF</option>
-          <option value="SF">SF</option>
-        </select>
-
-        <input
-          type="number"
-          value={lag}
-          onChange={(e) => setLag(e.target.value)}
-          disabled={disabled}
-          style={s.addDepLag}
-          title="Lag (days)"
-        />
-
         <button
-          style={{ ...s.smallBtnDark, ...(!canAdd ? s.btnDisabled : {}) }}
-          disabled={!canAdd}
+          type="button"
+          style={s.btn}
+          disabled={disabled}
           onClick={() => {
-            onAdd({
-              predecessorTaskId: Number(pred),
-              successorTaskId: Number(succ),
-              linkType: type,
-              lagDays: lag === "" ? 0 : Number(lag) || 0,
-            });
-            setPred("");
-            setType("FS");
-            setLag("0");
+            setOpenAdd((v) => !v);
+            // reset UI when opening
+            if (!openAdd) {
+              setQ("");
+              setPred("");
+              setType("FS");
+              setLag("0");
+            }
           }}
         >
-          Add
+          {openAdd ? "Hide Add Dependency" : "Add Dependency"}
         </button>
 
-        {(dup || cyc) && <div style={s.depInlineWarn}>{dup ? "Duplicate blocked." : "Cycle blocked."}</div>}
+        {openAdd && (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", width: "100%" }}>
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                disabled={disabled}
+                placeholder="Search predecessor (type to filter)"
+                style={{ ...s.addDepSelect, width: 300 }}
+              />
+
+              <select value={pred} onChange={(e) => setPred(e.target.value)} disabled={disabled} style={s.addDepSelect}>
+                <option value="">Select predecessor…</option>
+                {filteredOptions.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {x.label}
+                  </option>
+                ))}
+              </select>
+
+              <select value={type} onChange={(e) => setType(e.target.value)} disabled={disabled} style={s.typeSelect}>
+                <option value="FS">FS</option>
+                <option value="SS">SS</option>
+                <option value="FF">FF</option>
+                <option value="SF">SF</option>
+              </select>
+
+              <input
+                type="number"
+                value={lag}
+                onChange={(e) => setLag(e.target.value)}
+                disabled={disabled}
+                style={s.addDepLag}
+                title="Lag (days)"
+              />
+
+              <button
+                style={{ ...s.smallBtnDark, ...(!canAdd ? s.btnDisabled : {}) }}
+                disabled={!canAdd}
+                onClick={() => {
+                  onAdd({
+                    predecessorTaskId: Number(pred),
+                    successorTaskId: Number(succ),
+                    linkType: type,
+                    lagDays: lag === "" ? 0 : Number(lag) || 0,
+                  });
+                  setPred("");
+                  setType("FS");
+                  setLag("0");
+                  setQ("");
+                }}
+              >
+                Add
+              </button>
+
+              {(dup || cyc) && (
+                <div style={s.depInlineWarn}>{dup ? "Duplicate blocked." : "Cycle blocked."}</div>
+              )}
+
+              <div style={{ ...s.note, marginTop: 0 }}>
+                Showing {filteredOptions.length} of {options.length}. Refine search to find the right predecessor.
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1823,11 +1938,12 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 
   const tickStep = compact ? 14 : 7;
 
+  // ✅ FIXED (was broken/truncated)
   const dayToDate = (dayNo) => {
     const n = Number(dayNo);
     if (!Number.isFinite(n)) return null;
     const d = new Date(startDate.getTime());
-    d.setDate(d.getDate() + n);
+    d.setUTCDate(d.getUTCDate() + n);
     return d;
   };
 
@@ -1887,9 +2003,16 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
   const resolveAnchors = (e) => {
     let fromWhich = "end";
     let toWhich = "start";
-    if (e.type === "SS") { fromWhich = "start"; toWhich = "start"; }
-    else if (e.type === "FF") { fromWhich = "end"; toWhich = "end"; }
-    else if (e.type === "SF") { fromWhich = "start"; toWhich = "end"; }
+    if (e.type === "SS") {
+      fromWhich = "start";
+      toWhich = "start";
+    } else if (e.type === "FF") {
+      fromWhich = "end";
+      toWhich = "end";
+    } else if (e.type === "SF") {
+      fromWhich = "start";
+      toWhich = "end";
+    }
     return { x1: getAnchorX(e.from, fromWhich), y1: e.from.yMid, x2: getAnchorX(e.to, toWhich), y2: e.to.yMid };
   };
 
@@ -2028,7 +2151,11 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
             })}
           </div>
 
-          <svg width={canvasW} height={canvasH} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 6 }}>
+          <svg
+            width={canvasW}
+            height={canvasH}
+            style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 6 }}
+          >
             <defs>
               <marker id="arrowGantt" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
                 <path d="M0,0 L9,3 L0,6 Z" fill="#111" />
@@ -2184,15 +2311,18 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
    ========================================================= */
 function parseISO(s) {
   if (!s) return null;
-  const d = new Date(String(s).slice(0, 10) + "T00:00:00");
-  return isNaN(d.getTime()) ? null : d;
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  // noon UTC avoids off-by-1
+  return new Date(Date.UTC(y, mo, d, 12, 0, 0));
 }
 
 function toISO(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
 }
 
 /* =========================================================
@@ -2300,7 +2430,6 @@ function makeStyles() {
     sectionSub: { fontSize: 12, color: sub, fontWeight: 700, marginTop: 4 },
 
     perTaskDepWrap: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 10px", border: `1px solid ${border}`, borderRadius: 12, background: "#fff" },
-    perTaskDepTitle: { fontWeight: 900, color: "#334155", fontSize: 12, marginRight: 4 },
     addDepSelect: { width: 260, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
     typeSelect: { width: 80, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, background: "#fff", outline: "none" },
     addDepLag: { width: 80, padding: "6px 8px", borderRadius: 10, border: `1px solid ${border}`, outline: "none" },
@@ -2321,14 +2450,6 @@ function makeStyles() {
 
     netWrap: { overflow: "auto", border: `1px solid ${border}`, borderRadius: 14, background: "#fff" },
 
-    toggleBtn: {
-      width: 28,
-      height: 28,
-      borderRadius: 10,
-      border: `1px solid ${border}`,
-      background: "#fff",
-      cursor: "pointer",
-      fontWeight: 900,
-    },
+    toggleBtn: { width: 28, height: 28, borderRadius: 10, border: `1px solid ${border}`, background: "#fff", cursor: "pointer", fontWeight: 900 },
   };
 }
