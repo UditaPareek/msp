@@ -276,12 +276,8 @@ export default function App() {
   // -------------------- milestone parsing for Edit Milestones modal (ROBUST) --------------------
 function anyToISODate(v) {
   if (!v) return "";
-  // Accept Date, ISO string, "YYYY-MM-DD...", etc.
-  if (v instanceof Date && !isNaN(v.getTime())) return toISO(v);
   const s = String(v).slice(0, 10);
-  const d = new Date(s + "T00:00:00");
-  if (isNaN(d.getTime())) return "";
-  return toISO(d);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
 }
 
 function pickDate(...vals) {
@@ -1293,13 +1289,16 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
   }, [initial]); // ✅ correct
 
   const commContract = initial?.COMM_CONTRACT || "";
-  const commissioningInternalDate = useMemo(() => {
-    const d = parseISO(commContract);
-    if (!d) return "";
-    const x = new Date(d.getTime());
-    x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
-    return toISO(x);
-  }, [commContract, bufferDays]);
+const commInternal = initial?.COMM_INTERNAL || "";
+
+const commissioningInternalDate = useMemo(() => {
+  if (commInternal) return commInternal; // ✅ prefer DB value
+  const d = parseISO(commContract);
+  if (!d) return "";
+  const x = new Date(d.getTime());
+  x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
+  return toISO(x);
+}, [commContract, commInternal, bufferDays]);
 
   // PATCH: empty string => null (means clear/delete milestone)
   const patch = useMemo(() => {
@@ -1330,8 +1329,7 @@ function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) 
         <div style={s.modalBody}>
           <div style={s.sectionTitle}>Reference (read-only)</div>
           <div style={s.sectionSub}>
-            LOI: <b>{initial?.LOI || "-"}</b> • Contract COD: <b>{initial?.COMM_CONTRACT || "-"}</b> • Internal COD:{" "}
-            <b>{commissioningInternalDate || "-"}</b>
+            LOI: <b>{initial?.LOI || "-"}</b> • Contract COD: <b>{initial?.COMM_CONTRACT || "-"}</b> • Internal COD: <b>{commInternal || commissioningInternalDate || "-"}</b>
           </div>
 
           <div style={{ marginTop: 12 }}>
