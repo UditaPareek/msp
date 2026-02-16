@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 import { API_BASE } from "./config";
 import logo from "./assets/msp-lite-logo.png";
+
 /**
  * MSP Lite — App.jsx (FULL)
  *
@@ -11,13 +12,15 @@ import logo from "./assets/msp-lite-logo.png";
  * 3) Drag-to-link in Gantt (FS+0)
  * 4) New Project modal (template hidden; buffer fixed)
  * 5) Build job polling after createProject
- * 6) Edit Optional Milestones AFTER project creation (updateProjectMilestones) + recalc+reload
+ * 6) Edit Milestones AFTER project creation (updateProjectMilestones) + recalc+reload
  * 7) Task relations popup (preds/succs)
  *
- * FIXES ADDED:
- * - ✅ GanttDates dayToDate compile bug fixed (was truncated)
- * - ✅ Task Table no longer renders 3000-option predecessor dropdown per row by default
- *   (Add Dependency UI is collapsed by default + includes search + limited options)
+ * FIXES ADDED (Milestones correctness):
+ * - Prefer LOI milestone as project start (avoid stale ProjectStartDate)
+ * - Parse milestones case-insensitively (map + array)
+ * - Include COMM_INTERNAL in parsed milestone set
+ * - Edit Milestones modal can edit LOI + Contract COD; Internal COD shows DB value if present,
+ *   otherwise derived = Contract - bufferDays, and if Contract changes we also patch COMM_INTERNAL.
  */
 
 const TABS = [
@@ -42,6 +45,9 @@ const MILESTONE_FIELDS = [
   { key: "GRID_STUDY", label: "Grid Study" },
   { key: "COMM_CONTRACT", label: "Commissioning (as per Contract)", required: true },
 ];
+
+// Milestone keys we want to parse for the UI (includes Internal COD even if not in fields list)
+const MILESTONE_KEYS_FOR_UI = Array.from(new Set([...MILESTONE_FIELDS.map((f) => f.key), "COMM_INTERNAL"]));
 
 /* =========================================================
    Graph utilities (cycle prevention + duplicate prevention)
@@ -92,6 +98,39 @@ function isDuplicateEdge(depPairs, predId, succId) {
   const P = normalizeId(predId);
   const S = normalizeId(succId);
   return (depPairs || []).some((e) => normalizeId(e.predId) === P && normalizeId(e.succId) === S);
+}
+
+/* =========================================================
+   Date helpers
+   ========================================================= */
+function parseISO(s) {
+  if (!s) return null;
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  // noon UTC avoids off-by-1 day
+  return new Date(Date.UTC(y, mo, d, 12, 0, 0));
+}
+
+function toISO(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "";
+  return d.toISOString().slice(0, 10);
+}
+
+function anyToISODate(v) {
+  if (!v) return "";
+  const s = String(v).trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
+}
+
+function pickDate(...vals) {
+  for (const v of vals) {
+    const iso = anyToISODate(v);
+    if (iso) return iso;
+  }
+  return "";
 }
 
 /* =========================================================
@@ -229,28 +268,34 @@ export default function App() {
   const selectedSuccs = selectedTaskId ? successorsByTask.get(normalizeId(selectedTaskId)) || [] : [];
 
   /* -------------------- date model (LOI = project start) -------------------- */
+  // ✅ Prefer LOI milestone (source of truth). Fallback to Project table start date.
   const projectStartDate = useMemo(() => {
-    const direct = parseISO(project?.projectStartDate);
-    if (direct) return direct;
+    let loi = null;
 
     if (project?.milestones && typeof project.milestones === "object") {
-      const m = project.milestones;
-      const loi = parseISO(m.LOI || m.loi || m.loiDate);
-      if (loi) return loi;
+      const norm = {};
+      for (const [k, v] of Object.entries(project.milestones)) {
+        norm[String(k).trim().toUpperCase()] = v;
+      }
+      loi = parseISO(norm.LOI);
     }
 
-    if (Array.isArray(project?.Milestones)) {
-      const loiRow = project.Milestones.find(
-        (x) => String(x?.MilestoneCode ?? x?.Key ?? x?.key) === "LOI"
-      );
-      const loi = parseISO(
-        loiRow?.MilestoneDate ?? loiRow?.Date ?? loiRow?.date ?? loiRow?.Value ?? loiRow?.value
-      );
-      if (loi) return loi;
+    if (!loi && Array.isArray(project?.Milestones)) {
+      for (const row of project.Milestones) {
+        const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim().toUpperCase();
+        if (code === "LOI") {
+          const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
+          loi = parseISO(dt);
+          break;
+        }
+      }
     }
 
-    return null;
-  }, [project?.projectStartDate, project?.milestones, project?.Milestones]);
+    if (loi) return loi;
+
+    const direct = parseISO(project?.projectStartDate || project?.ProjectStartDate);
+    return direct || null;
+  }, [project]);
 
   const dayToDate = (dayNo) => {
     if (!projectStartDate) return null;
@@ -272,73 +317,64 @@ export default function App() {
 
   const needsStartDate = tasks.length > 0 && !projectStartDate;
 
-  /* -------------------- milestone parsing for Edit Milestones modal -------------------- */
-  // -------------------- milestone parsing for Edit Milestones modal (ROBUST) --------------------
-function anyToISODate(v) {
-  if (!v) return "";
-  const s = String(v).slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
-}
+  /* -------------------- milestone parsing for Edit Milestones modal (CORRECT) -------------------- */
+  const currentMilestones = useMemo(() => {
+    const out = {};
+    for (const k of MILESTONE_KEYS_FOR_UI) out[k] = "";
 
-function pickDate(...vals) {
-  for (const v of vals) {
-    const iso = anyToISODate(v);
-    if (iso) return iso;
-  }
-  return "";
-}
-
-const currentMilestones = useMemo(() => {
-  const out = {};
-  for (const f of MILESTONE_FIELDS) out[f.key] = "";
-
-  // 1) If API gives a milestones map (best case)
-  if (project?.milestones && typeof project.milestones === "object") {
-    for (const k of Object.keys(out)) out[k] = anyToISODate(project.milestones[k]);
-  }
-
-  // 2) If API gives a milestones array
-  if (Array.isArray(project?.Milestones)) {
-    for (const row of project.Milestones) {
-      const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim();
-      const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
-      if (code && code in out) out[code] = anyToISODate(dt);
+    // 1) milestones map (case-insensitive)
+    if (project?.milestones && typeof project.milestones === "object") {
+      const norm = {};
+      for (const [k, v] of Object.entries(project.milestones)) {
+        norm[String(k).trim().toUpperCase()] = v;
+      }
+      for (const k of Object.keys(out)) out[k] = anyToISODate(norm[k]);
     }
-  }
 
-  // 3) HARD FALLBACKS (this is what fixes your UI)
-  // LOI fallback from projectStartDate (most backends do provide this)
-  out.LOI = out.LOI || pickDate(
-    project?.projectStartDate,
-    project?.ProjectStartDate,
-    project?.LOI,
-    project?.loi
-  );
+    // 2) milestones array (case-insensitive)
+    if (Array.isArray(project?.Milestones)) {
+      for (const row of project.Milestones) {
+        const code = String(row?.MilestoneCode ?? row?.Key ?? row?.key ?? "").trim().toUpperCase();
+        const dt = row?.MilestoneDate ?? row?.Date ?? row?.date ?? row?.Value ?? row?.value;
+        if (code && code in out) out[code] = anyToISODate(dt);
+      }
+    }
 
-  // Contract COD fallback from common field names (adjusted for typical backends)
-  out.COMM_CONTRACT = out.COMM_CONTRACT || pickDate(
-    project?.contractCOD,
-    project?.contractCod,
-    project?.ContractCOD,
-    project?.contractCommissioningDate,
-    project?.ContractCommissioningDate,
-    project?.commContract,
-    project?.CommContractDate,
-    project?.COMM_CONTRACT
-  );
+    // 3) hard fallbacks
+    out.LOI =
+      out.LOI ||
+      pickDate(project?.projectStartDate, project?.ProjectStartDate, project?.LOI, project?.loi);
 
-  // If your backend stores internal COD explicitly, try to show it too (optional)
-  // (Even if you don't store it, modal will compute Internal COD from COMM_CONTRACT - bufferDays)
-  out.COMM_INTERNAL = out.COMM_INTERNAL || pickDate(
-    project?.internalCOD,
-    project?.internalCod,
-    project?.InternalCOD,
-    project?.internalCommissioningDate,
-    project?.COMM_INTERNAL
-  );
+    out.COMM_CONTRACT =
+      out.COMM_CONTRACT ||
+      pickDate(
+        project?.contractCOD,
+        project?.contractCod,
+        project?.ContractCOD,
+        project?.COMM_CONTRACT
+      );
 
-  return out;
-}, [project]);
+    out.COMM_INTERNAL =
+      out.COMM_INTERNAL ||
+      pickDate(
+        project?.internalCOD,
+        project?.internalCod,
+        project?.InternalCOD,
+        project?.COMM_INTERNAL
+      );
+
+    // If still missing internal, derive from contract
+    if (!out.COMM_INTERNAL && out.COMM_CONTRACT) {
+      const d = parseISO(out.COMM_CONTRACT);
+      if (d) {
+        const x = new Date(d.getTime());
+        x.setUTCDate(x.getUTCDate() - Number(BUFFER_DAYS_FIXED || 30));
+        out.COMM_INTERNAL = toISO(x);
+      }
+    }
+
+    return out;
+  }, [project]);
 
   /* -------------------- fetch helpers -------------------- */
   async function safeJson(res) {
@@ -488,7 +524,7 @@ const currentMilestones = useMemo(() => {
     return json;
   }
 
-  // update optional milestones after project creation
+  // update milestones after project creation
   async function updateProjectMilestonesApi({ projectId, milestones }) {
     const { res, json } = await fetchJson(`${API_BASE}/updateProjectMilestones?t=${Date.now()}`, {
       method: "PATCH",
@@ -665,7 +701,7 @@ const currentMilestones = useMemo(() => {
               onClick={() => setShowEditMilestones(true)}
               disabled={loading || !(project?.ProjectId ?? projectId)}
               style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}
-              title="Update optional milestone dates for this project"
+              title="Update milestone dates for this project"
             >
               Edit Milestones
             </button>
@@ -677,7 +713,7 @@ const currentMilestones = useMemo(() => {
         {needsStartDate && (
           <div style={s.warn}>
             Missing LOI/projectStartDate from API. UI cannot show dd-MMM-yy target dates until backend returns LOI as{" "}
-            <code>project.projectStartDate</code> (or milestones include LOI).
+            <code>project.milestones.LOI</code> (or milestones include LOI).
           </div>
         )}
 
@@ -964,7 +1000,7 @@ const currentMilestones = useMemo(() => {
         />
       )}
 
-      {/* Edit Optional Milestones Modal */}
+      {/* Edit Milestones Modal */}
       {showEditMilestones && (
         <EditMilestonesModal
           loading={loading}
@@ -1270,55 +1306,74 @@ function NewProjectModal({ onClose, onCreate, loading, bufferDays }) {
   );
 }
 
-/* -------------------- Edit Optional Milestones Modal (after creation) -------------------- */
+/* -------------------- Edit Milestones Modal (correct LOI/Contract/Internal behavior) -------------------- */
 function EditMilestonesModal({ onClose, onSave, loading, initial, bufferDays }) {
   const s = makeStyles();
-  const OPTIONAL_FIELDS = MILESTONE_FIELDS.filter((f) => !f.required);
+
+  // Allow editing LOI + COMM_CONTRACT + optional milestones (everything in MILESTONE_FIELDS)
+  const EDIT_FIELDS = MILESTONE_FIELDS;
 
   const [vals, setVals] = useState(() => {
     const o = {};
-    for (const f of OPTIONAL_FIELDS) o[f.key] = initial?.[f.key] || "";
+    for (const f of EDIT_FIELDS) o[f.key] = initial?.[f.key] || "";
     return o;
   });
 
-  // keep in sync if project changes while modal open
   useEffect(() => {
     const o = {};
-    for (const f of OPTIONAL_FIELDS) o[f.key] = initial?.[f.key] || "";
+    for (const f of EDIT_FIELDS) o[f.key] = initial?.[f.key] || "";
     setVals(o);
-  }, [initial]); // ✅ correct
+  }, [initial]); // keep in sync if project changes
 
-  const commContract = initial?.COMM_CONTRACT || "";
-const commInternal = initial?.COMM_INTERNAL || "";
+  const contractISO = anyToISODate(vals.COMM_CONTRACT);
+  const prevContractISO = anyToISODate(initial?.COMM_CONTRACT);
+  const dbInternalISO = anyToISODate(initial?.COMM_INTERNAL);
 
-const commissioningInternalDate = useMemo(() => {
-  if (commInternal) return commInternal; // ✅ prefer DB value
-  const d = parseISO(commContract);
-  if (!d) return "";
-  const x = new Date(d.getTime());
-  x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
-  return toISO(x);
-}, [commContract, commInternal, bufferDays]);
+  const internalDerived = useMemo(() => {
+    if (!contractISO) return "";
+    const d = parseISO(contractISO);
+    if (!d) return "";
+    const x = new Date(d.getTime());
+    x.setUTCDate(x.getUTCDate() - Number(bufferDays || 30));
+    return toISO(x);
+  }, [contractISO, bufferDays]);
 
-  // PATCH: empty string => null (means clear/delete milestone)
+  const internalShown = useMemo(() => {
+    // If DB has internal and contract unchanged, show DB internal; else show derived
+    if (dbInternalISO && contractISO === prevContractISO) return dbInternalISO;
+    return internalDerived;
+  }, [dbInternalISO, contractISO, prevContractISO, internalDerived]);
+
+  // PATCH: empty string => null (clear milestone)
   const patch = useMemo(() => {
     const p = {};
-    for (const f of OPTIONAL_FIELDS) {
-      const next = String(vals[f.key] || "").trim();
-      const prev = String(initial?.[f.key] || "").trim();
+
+    for (const f of EDIT_FIELDS) {
+      const next = anyToISODate(vals[f.key]);
+      const prev = anyToISODate(initial?.[f.key]);
       if (next !== prev) p[f.key] = next ? next : null;
     }
+
+    // Keep COMM_INTERNAL consistent with Contract COD:
+    if (contractISO) {
+      if (contractISO !== prevContractISO || !dbInternalISO) {
+        p.COMM_INTERNAL = internalDerived ? internalDerived : null;
+      }
+    } else if (prevContractISO) {
+      p.COMM_INTERNAL = null;
+    }
+
     return p;
-  }, [vals, initial, OPTIONAL_FIELDS]);
+  }, [vals, initial, contractISO, prevContractISO, dbInternalISO, internalDerived, EDIT_FIELDS]);
 
   return (
     <div style={s.modalOverlay} onMouseDown={onClose}>
       <div style={s.modal} onMouseDown={(e) => e.stopPropagation()}>
         <div style={s.modalHeader}>
           <div>
-            <div style={s.modalTitle}>Edit Optional Milestones</div>
+            <div style={s.modalTitle}>Edit Milestones</div>
             <div style={s.modalSub}>
-              Update optional milestone dates. Empty value will clear that milestone. Save triggers Recalculate.
+              LOI + Contract COD affect schedule base. Internal COD shown is Contract − {bufferDays} days. Save triggers Recalculate.
             </div>
           </div>
           <button style={s.iconBtn} onClick={onClose} disabled={loading}>
@@ -1327,16 +1382,17 @@ const commissioningInternalDate = useMemo(() => {
         </div>
 
         <div style={s.modalBody}>
-          <div style={s.sectionTitle}>Reference (read-only)</div>
+          <div style={s.sectionTitle}>Reference (live)</div>
           <div style={s.sectionSub}>
-            LOI: <b>{initial?.LOI || "-"}</b> • Contract COD: <b>{initial?.COMM_CONTRACT || "-"}</b> • Internal COD: <b>{commInternal || commissioningInternalDate || "-"}</b>
+            LOI: <b>{anyToISODate(vals.LOI) || "-"}</b> • Contract COD: <b>{contractISO || "-"}</b> • Internal COD:{" "}
+            <b>{internalShown || "-"}</b>
           </div>
 
           <div style={{ marginTop: 12 }}>
-            <div style={s.sectionTitle}>Optional Milestones</div>
+            <div style={s.sectionTitle}>Milestones</div>
             <div style={s.milestoneGrid}>
-              {OPTIONAL_FIELDS.map((f) => (
-                <Field key={f.key} label={f.label}>
+              {EDIT_FIELDS.map((f) => (
+                <Field key={f.key} label={f.label} required={!!f.required}>
                   <input
                     type="date"
                     style={s.inputWide}
@@ -1346,6 +1402,10 @@ const commissioningInternalDate = useMemo(() => {
                   />
                 </Field>
               ))}
+
+              <Field label="Commissioning (internal schedule)" hint={`Derived = Contract - ${bufferDays} days`}>
+                <input type="date" style={s.inputWide} value={internalShown || ""} readOnly />
+              </Field>
             </div>
           </div>
         </div>
@@ -1729,7 +1789,6 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
   const [type, setType] = useState("FS");
   const [lag, setLag] = useState("0");
 
-  // Keep base options as ids; don't render as <option> until user opens
   const options = useMemo(() => {
     return (tasks || [])
       .filter((t) => normalizeId(t.TaskId) !== succ)
@@ -1739,7 +1798,6 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
       }));
   }, [tasks, succ]);
 
-  // Filtered options: show limited results to avoid DOM freeze
   const filteredOptions = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return options.slice(0, 120);
@@ -1792,7 +1850,6 @@ function PerTaskDependencies({ tasks, depPairs, successorTaskId, disabled, onAdd
           disabled={disabled}
           onClick={() => {
             setOpenAdd((v) => !v);
-            // reset UI when opening
             if (!openAdd) {
               setQ("");
               setPred("");
@@ -1983,7 +2040,6 @@ function GanttDates({ tasks, deps, depPairs, startDate, compact = false, onTaskC
 
   const tickStep = compact ? 14 : 7;
 
-  // ✅ FIXED (was broken/truncated)
   const dayToDate = (dayNo) => {
     const n = Number(dayNo);
     if (!Number.isFinite(n)) return null;
@@ -2352,26 +2408,7 @@ function NetworkDiagram({ tasks, deps, getPredId, getSuccId, getDepId, getLag, g
 }
 
 /* =========================================================
-   Date helpers
-   ========================================================= */
-function parseISO(s) {
-  if (!s) return null;
-  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]) - 1;
-  const d = Number(m[3]);
-  // noon UTC avoids off-by-1
-  return new Date(Date.UTC(y, mo, d, 12, 0, 0));
-}
-
-function toISO(d) {
-  if (!(d instanceof Date) || isNaN(d.getTime())) return "";
-  return d.toISOString().slice(0, 10);
-}
-
-/* =========================================================
-   Styles (compact but complete keys)
+   Styles
    ========================================================= */
 function makeStyles() {
   const border = "#e5eaf0";
@@ -2383,7 +2420,6 @@ function makeStyles() {
     page: { minHeight: "100vh", background: "#f6f8fb", color: text, fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial" },
     topbar: { position: "sticky", top: 0, zIndex: 50, background: "#fff", borderBottom: `1px solid ${border}`, padding: "12px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 },
     brandWrap: { display: "flex", alignItems: "center", gap: 10 },
-    brandDot: { width: 34, height: 34, borderRadius: 10, background: "linear-gradient(135deg, #0f172a, #1f2937)" },
     brandTitle: { fontWeight: 900 },
     brandSub: { fontSize: 12, color: sub, fontWeight: 700 },
 
