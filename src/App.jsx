@@ -771,93 +771,7 @@ export default function App() {
             )}
           </div>
         )}
-        function DashboardSummaryTable({ tasks, project, projectStartDate, projectFinishDate, fmtDDMMMYY }) {
-  const s = makeStyles();
-
-  const totalTasks = tasks?.length || 0;
-  const completedTasks = (tasks || []).filter(
-    (t) => String(t.Status || "").toUpperCase() === "COMPLETED"
-  ).length;
-
-  const pendingTasks = totalTasks - completedTasks;
-  const completionPct = totalTasks ? ((completedTasks / totalTasks) * 100).toFixed(1) : "0.0";
-  const criticalTasks = (tasks || []).filter(
-    (t) => t.IsCritical === 1 || t.IsCritical === true
-  ).length;
-
-  const rows = [
-    {
-      metric: "Project Name",
-      value: project?.ProjectName || "-",
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Total Tasks",
-      value: totalTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Completed Tasks",
-      value: completedTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Pending Tasks",
-      value: pendingTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Completion %",
-      value: `${completionPct}%`,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Critical Tasks",
-      value: criticalTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-  ];
-
-  return (
-    <div style={{ padding: 14, overflowX: "auto" }}>
-      <table style={s.table}>
-        <thead>
-          <tr>
-            <th style={s.th}>Metric</th>
-            <th style={s.th}>Value</th>
-            <th style={s.th}>Project Start Date</th>
-            <th style={s.th}>Project End Date</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} style={{ background: i % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
-              <td style={s.td}><b>{row.metric}</b></td>
-              <td style={s.tdMono}>{row.value}</td>
-              <td style={s.tdMono}>{row.start || "-"}</td>
-              <td style={s.tdMono}>{row.end || "-"}</td>
-            </tr>
-          ))}
-
-          {!tasks?.length && (
-            <tr>
-              <td colSpan={4} style={s.td}>
-                No schedule loaded.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
+        
         {/* Network */}
         {activeTab === "network" && (
           <div style={s.card}>
@@ -1110,6 +1024,93 @@ function EmptyState({ text }) {
   const s = makeStyles();
   return <div style={{ padding: 14, color: "#475569", fontWeight: 800 }}>{text}</div>;
 }
+function DashboardSummaryTable({ tasks, project, projectStartDate, projectFinishDate, fmtDDMMMYY }) {
+  const s = makeStyles();
+
+  const totalTasks = tasks?.length || 0;
+  const completedTasks = (tasks || []).filter(
+    (t) => String(t.Status || "").toUpperCase() === "COMPLETED"
+  ).length;
+
+  const pendingTasks = totalTasks - completedTasks;
+  const completionPct = totalTasks ? ((completedTasks / totalTasks) * 100).toFixed(1) : "0.0";
+  const criticalTasks = (tasks || []).filter(
+    (t) => t.IsCritical === 1 || t.IsCritical === true
+  ).length;
+
+  const rows = [
+    {
+      metric: "Project Name",
+      value: project?.ProjectName || "-",
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Total Tasks",
+      value: totalTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Completed Tasks",
+      value: completedTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Pending Tasks",
+      value: pendingTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Completion %",
+      value: `${completionPct}%`,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Critical Tasks",
+      value: criticalTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+  ];
+
+  return (
+    <div style={{ padding: 14, overflowX: "auto" }}>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            <th style={s.th}>Metric</th>
+            <th style={s.th}>Value</th>
+            <th style={s.th}>Project Start Date</th>
+            <th style={s.th}>Project End Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i} style={{ background: i % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
+              <td style={s.td}><b>{row.metric}</b></td>
+              <td style={s.tdMono}>{row.value}</td>
+              <td style={s.tdMono}>{row.start || "-"}</td>
+              <td style={s.tdMono}>{row.end || "-"}</td>
+            </tr>
+          ))}
+
+          {!tasks?.length && (
+            <tr>
+              <td colSpan={4} style={s.td}>
+                No schedule loaded.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 
 /* -------------------- Task Relations Modal -------------------- */
 function TaskRelationsModal({ onClose, task, preds, succs, taskById, dayToDate, fmtDDMMMYY }) {
