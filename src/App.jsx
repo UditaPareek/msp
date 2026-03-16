@@ -718,89 +718,27 @@ export default function App() {
         )}
 
         {/* Dashboard */}
-        {activeTab === "dashboard" && (
-          <>
-            <div style={s.card}>
-              <div style={s.cardHeader}>
-                <div>
-                  <div style={s.cardTitle}>Project Summary</div>
-                  <div style={s.cardSub}>Target dates are derived from LOI + ES/EF day offsets.</div>
-                </div>
-              </div>
+        {/* Dashboard */}
+{activeTab === "dashboard" && (
+  <div style={s.card}>
+    <div style={s.cardHeader}>
+      <div>
+        <div style={s.cardTitle}>Project Dashboard</div>
+        <div style={s.cardSub}>
+          Summary table with task progress and project dates only.
+        </div>
+      </div>
+    </div>
 
-              <div style={s.kpiGrid}>
-                <KpiCard label="Total Tasks" value={kpi.totalTasks} />
-                <KpiCard label="Completed" value={kpi.completed} />
-                <KpiCard label="Avg Completion" value={`${kpi.avgCompletion}%`} />
-                <KpiCard label="Critical Tasks" value={`${kpi.critical}`} />
-              </div>
-            </div>
-
-            <div style={s.twoCol}>
-              <div style={s.card}>
-                <div style={s.cardHeader}>
-                  <div>
-                    <div style={s.cardTitle}>Gantt Preview</div>
-                    <div style={s.cardSub}>
-                      Connectors + arrows. Click bar for preds/succs. Drag bar → bar to add FS link.
-                    </div>
-                  </div>
-                </div>
-                {tasks.length && projectStartDate ? (
-                  <GanttDates
-                    tasks={tasks}
-                    deps={deps}
-                    depPairs={depPairs}
-                    startDate={projectStartDate}
-                    compact
-                    onTaskClick={(id) => setSelectedTaskId(normalizeId(id))}
-                    onDragLink={(predId, succId) =>
-                      addDependencyGuarded({
-                        predecessorTaskId: predId,
-                        successorTaskId: succId,
-                        linkType: "FS",
-                        lagDays: 0,
-                      }).catch((e) => setError(e.message || String(e)))
-                    }
-                  />
-                ) : (
-                  <EmptyState text="Load a project (and LOI) to see a date-based Gantt." />
-                )}
-              </div>
-
-              <div style={s.card}>
-                <div style={s.cardHeader}>
-                  <div>
-                    <div style={s.cardTitle}>Critical Path (Top)</div>
-                    <div style={s.cardSub}>Tasks flagged critical by backend.</div>
-                  </div>
-                </div>
-
-                {tasks.length ? (
-                  <div style={{ padding: 12 }}>
-                    {(tasks || [])
-                      .filter((t) => t.IsCritical === 1 || t.IsCritical === true)
-                      .slice(0, 12)
-                      .map((t) => (
-                        <div key={normalizeId(getTaskId(t))} style={s.listRow}>
-                          <div style={{ fontWeight: 900 }}>{t.TaskName}</div>
-                          <div style={s.listMeta}>
-                            {t.Workstream} • Start {fmtDDMMMYY(dayToDate(t.ES))} • Finish {fmtDDMMMYY(dayToDate(t.EF))}
-                          </div>
-                        </div>
-                      ))}
-
-                    {(tasks || []).filter((t) => t.IsCritical === 1 || t.IsCritical === true).length === 0 && (
-                      <div style={s.muted}>No critical tasks returned. Check schedule calc.</div>
-                    )}
-                  </div>
-                ) : (
-                  <EmptyState text="No schedule loaded." />
-                )}
-              </div>
-            </div>
-          </>
-        )}
+    <DashboardSummaryTable
+      tasks={tasks}
+      project={project}
+      projectStartDate={projectStartDate}
+      projectFinishDate={kpi.finishDate}
+      fmtDDMMMYY={fmtDDMMMYY}
+    />
+  </div>
+)}
 
         {/* Gantt */}
         {activeTab === "gantt" && (
@@ -833,6 +771,92 @@ export default function App() {
             )}
           </div>
         )}
+        function DashboardSummaryTable({ tasks, project, projectStartDate, projectFinishDate, fmtDDMMMYY }) {
+  const s = makeStyles();
+
+  const totalTasks = tasks?.length || 0;
+  const completedTasks = (tasks || []).filter(
+    (t) => String(t.Status || "").toUpperCase() === "COMPLETED"
+  ).length;
+
+  const pendingTasks = totalTasks - completedTasks;
+  const completionPct = totalTasks ? ((completedTasks / totalTasks) * 100).toFixed(1) : "0.0";
+  const criticalTasks = (tasks || []).filter(
+    (t) => t.IsCritical === 1 || t.IsCritical === true
+  ).length;
+
+  const rows = [
+    {
+      metric: "Project Name",
+      value: project?.ProjectName || "-",
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Total Tasks",
+      value: totalTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Completed Tasks",
+      value: completedTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Pending Tasks",
+      value: pendingTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Completion %",
+      value: `${completionPct}%`,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+    {
+      metric: "Critical Tasks",
+      value: criticalTasks,
+      start: fmtDDMMMYY(projectStartDate),
+      end: fmtDDMMMYY(projectFinishDate),
+    },
+  ];
+
+  return (
+    <div style={{ padding: 14, overflowX: "auto" }}>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            <th style={s.th}>Metric</th>
+            <th style={s.th}>Value</th>
+            <th style={s.th}>Project Start Date</th>
+            <th style={s.th}>Project End Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i} style={{ background: i % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
+              <td style={s.td}><b>{row.metric}</b></td>
+              <td style={s.tdMono}>{row.value}</td>
+              <td style={s.tdMono}>{row.start || "-"}</td>
+              <td style={s.tdMono}>{row.end || "-"}</td>
+            </tr>
+          ))}
+
+          {!tasks?.length && (
+            <tr>
+              <td colSpan={4} style={s.td}>
+                No schedule loaded.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
         {/* Network */}
         {activeTab === "network" && (
