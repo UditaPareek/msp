@@ -732,7 +732,6 @@ export default function App() {
 
     <DashboardSummaryTable
       tasks={tasks}
-      project={project}
       projectStartDate={projectStartDate}
       projectFinishDate={kpi.finishDate}
       fmtDDMMMYY={fmtDDMMMYY}
@@ -1024,83 +1023,49 @@ function EmptyState({ text }) {
   const s = makeStyles();
   return <div style={{ padding: 14, color: "#475569", fontWeight: 800 }}>{text}</div>;
 }
-function DashboardSummaryTable({ tasks, project, projectStartDate, projectFinishDate, fmtDDMMMYY }) {
+function DashboardSummaryTable({ tasks, projectStartDate, projectFinishDate, fmtDDMMMYY }) {
   const s = makeStyles();
 
   const totalTasks = tasks?.length || 0;
+
   const completedTasks = (tasks || []).filter(
     (t) => String(t.Status || "").toUpperCase() === "COMPLETED"
   ).length;
 
-  const pendingTasks = totalTasks - completedTasks;
-  const completionPct = totalTasks ? ((completedTasks / totalTasks) * 100).toFixed(1) : "0.0";
   const criticalTasks = (tasks || []).filter(
     (t) => t.IsCritical === 1 || t.IsCritical === true
   ).length;
 
-  const rows = [
-    {
-      metric: "Project Name",
-      value: project?.ProjectName || "-",
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Total Tasks",
-      value: totalTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Completed Tasks",
-      value: completedTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Pending Tasks",
-      value: pendingTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Completion %",
-      value: `${completionPct}%`,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-    {
-      metric: "Critical Tasks",
-      value: criticalTasks,
-      start: fmtDDMMMYY(projectStartDate),
-      end: fmtDDMMMYY(projectFinishDate),
-    },
-  ];
+  const completionPct = totalTasks
+    ? ((completedTasks / totalTasks) * 100).toFixed(1)
+    : "0.0";
 
   return (
     <div style={{ padding: 14, overflowX: "auto" }}>
       <table style={s.table}>
         <thead>
           <tr>
-            <th style={s.th}>Metric</th>
-            <th style={s.th}>Value</th>
+            <th style={s.th}>Total Tasks</th>
+            <th style={s.th}>Completed Tasks</th>
+            <th style={s.th}>Critical Tasks</th>
+            <th style={s.th}>Completion %</th>
             <th style={s.th}>Project Start Date</th>
             <th style={s.th}>Project End Date</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} style={{ background: i % 2 === 0 ? "#ffffff" : "#fbfdff" }}>
-              <td style={s.td}><b>{row.metric}</b></td>
-              <td style={s.tdMono}>{row.value}</td>
-              <td style={s.tdMono}>{row.start || "-"}</td>
-              <td style={s.tdMono}>{row.end || "-"}</td>
-            </tr>
-          ))}
+          <tr style={{ background: "#ffffff" }}>
+            <td style={s.tdMono}>{totalTasks}</td>
+            <td style={s.tdMono}>{completedTasks}</td>
+            <td style={s.tdMono}>{criticalTasks}</td>
+            <td style={s.tdMono}>{completionPct}%</td>
+            <td style={s.tdMono}>{fmtDDMMMYY(projectStartDate) || "-"}</td>
+            <td style={s.tdMono}>{fmtDDMMMYY(projectFinishDate) || "-"}</td>
+          </tr>
 
           {!tasks?.length && (
             <tr>
-              <td colSpan={4} style={s.td}>
+              <td colSpan={6} style={s.td}>
                 No schedule loaded.
               </td>
             </tr>
@@ -2555,7 +2520,25 @@ function makeStyles() {
     ganttHeader: { display: "flex", alignItems: "center", paddingLeft: 10, fontWeight: 900, color: "#334155", background: "#fff", borderBottom: `1px solid ${border}` },
 
     netWrap: { overflow: "auto", border: `1px solid ${border}`, borderRadius: 14, background: "#fff" },
+    th: {
+  textAlign: "center",
+  padding: "10px 10px",
+  background: "#f1f5f9",
+  borderBottom: `1px solid ${border}`,
+  fontWeight: 900,
+  color: text,
+  whiteSpace: "nowrap",
+},
 
+tdMono: {
+  padding: "14px 10px",
+  borderBottom: "1px solid #eef2f7",
+  verticalAlign: "middle",
+  textAlign: "center",
+  color: text,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  fontWeight: 800,
+},
     toggleBtn: { width: 28, height: 28, borderRadius: 10, border: `1px solid ${border}`, background: "#fff", cursor: "pointer", fontWeight: 900 },
   };
 }
